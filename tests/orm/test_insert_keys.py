@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import pytest
@@ -40,7 +41,10 @@ def database(backend):
         with admin.begin() as conn:
             conn.execute(sa.schema.CreateSchema(schema))
         try:
-            yield engine, scoped.render_as_string(hide_password=False)
+            # The Rust PostgreSQL driver percent-decodes URI options literally.
+            address = scoped.set(query={}).render_as_string(hide_password=False)
+            query = urlencode(scoped.query, doseq=True, quote_via=quote)
+            yield engine, f"{address}?{query}"
         finally:
             engine.dispose()
             with admin.begin() as conn:
