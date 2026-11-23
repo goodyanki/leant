@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install elan and Lean toolchain
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Check for sorry in core library
+        run: |
+          if grep -rn '\bsorry\b' Leant.lean Leant/; then
+            echo "ERROR: 'sorry' found in core library!"
+            exit 1
+          fi
+
+      - name: Build Leant and examples
+        run: |
+          lake build
+          lake build hello
+
+      - name: Run unit and in-memory HTTP tests
+        run: lake test

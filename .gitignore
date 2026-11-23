@@ -1,0 +1,14 @@
+# Lake / Lean
+/.lake/
+/build/
+*.olean
+*.ilean
+*.trace
+
+# Rust
+/transport/rust-http/target/
+
+# OS / Editor
+.DS_Store
+*.swp
+*.log
