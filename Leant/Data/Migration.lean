@@ -13,11 +13,14 @@ inductive MigrationOp where
 
 namespace MigrationOp
 
-/-- Renders a `MigrationOp` into deterministic SQL DDL. -/
-def toSql : MigrationOp → String
-  | .createTable s => s.createTableSql
+/-- Renders a `MigrationOp` into deterministic SQL DDL for target dialect `d`. -/
+def toSqlFor (d : SqlDialect) : MigrationOp → String
+  | .createTable s => s.createTableSqlFor d
   | .dropTable name => "DROP TABLE IF EXISTS " ++ name.val
-  | .addColumn tbl col => "ALTER TABLE " ++ tbl.val ++ " ADD COLUMN " ++ col.ddlColumn
+  | .addColumn tbl col => "ALTER TABLE " ++ tbl.val ++ " ADD COLUMN " ++ col.ddlColumnFor d
+
+/-- Renders a `MigrationOp` into deterministic SQL DDL (defaults to SQLite dialect). -/
+def toSql : MigrationOp → String := toSqlFor .sqlite
 
 end MigrationOp
 
@@ -50,7 +53,7 @@ structure Migration where
 
 private def ensureVersionTable {δ : Type} [Driver δ] (conn : δ) : IO Unit :=
   Driver.exec conn {
-    sql := "CREATE TABLE IF NOT EXISTS _leant_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    sql := "CREATE TABLE IF NOT EXISTS _leant_migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL)"
     params := #[]
   }
 
@@ -70,6 +73,7 @@ def appliedVersions {δ : Type} [Driver δ] (pool : Pool δ) : IO (Array Nat) :=
 /-- Applies all pending migrations whose `version` has not yet been recorded.
     Each migration runs atomically inside a transaction. Returns newly applied version numbers. -/
 def migrateUp {δ : Type} [Driver δ] (pool : Pool δ) (migrations : List Migration) : IO (Array Nat) := do
+  let dialect := Driver.dialect (δ := δ)
   let applied ← appliedVersions pool
   let mut ran : Array Nat := #[]
   for m in migrations do
@@ -77,7 +81,7 @@ def migrateUp {δ : Type} [Driver δ] (pool : Pool δ) (migrations : List Migrat
       pool.withTransaction fun conn => do
         ensureVersionTable conn
         for op in m.up do
-          Driver.exec conn { sql := op.toSql, params := #[] }
+          Driver.exec conn { sql := op.toSqlFor dialect, params := #[] }
         Driver.exec conn {
           sql := "INSERT INTO _leant_migrations (version, name) VALUES (?, ?)"
           params := #[.int m.version, .text m.name]
@@ -88,6 +92,7 @@ def migrateUp {δ : Type} [Driver δ] (pool : Pool δ) (migrations : List Migrat
 /-- Rolls back the most recently applied migration matching `migrations`.
     Returns `some version` if rolled back, or `none` if no applied migrations exist. -/
 def rollbackLast {δ : Type} [Driver δ] (pool : Pool δ) (migrations : List Migration) : IO (Option Nat) := do
+  let dialect := Driver.dialect (δ := δ)
   let applied ← appliedVersions pool
   match applied.back? with
   | none => pure none
@@ -97,7 +102,7 @@ def rollbackLast {δ : Type} [Driver δ] (pool : Pool δ) (migrations : List Mig
     | some m =>
       pool.withTransaction fun conn => do
         for op in m.down do
-          Driver.exec conn { sql := op.toSql, params := #[] }
+          Driver.exec conn { sql := op.toSqlFor dialect, params := #[] }
         Driver.exec conn {
           sql := "DELETE FROM _leant_migrations WHERE version = ?"
           params := #[.int m.version]

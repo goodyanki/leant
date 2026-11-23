@@ -1,4 +1,5 @@
 import Leant.Authz.Basic
+import Leant.Authz.Guard
 import Leant.Data.Query
 import Leant.Data.Theorems
 
@@ -113,5 +114,19 @@ theorem rls_principal_alignment {tbl : Table (.tenantScoped .text)}
     (hmatch : (q.forTenant p.tenant).evalFilter row = true) :
     row.get tbl.tenantCol = p.tenant :=
   Leant.Data.Theorems.rls_select_soundness q p.tenant row hmatch
+
+/-- Theorem 11 (Collection Read-Visibility Consistency):
+    Every item emitted by `filterAuthorized` satisfies the exact same `evaluate = .allow`
+    and tenant-isolation guarantees as single-item `guard`/`requires`. -/
+theorem filterAuthorized_sound {α : Type} (pol : Policy) (p : Principal) (a : Action)
+    (toResource : α → Resource) (items : Array α) (x : α)
+    (hx : x ∈ (filterAuthorized pol p a toResource items).toList) :
+    evaluate pol p a (toResource x) = .allow ∧ (toResource x).tenant = p.tenant := by
+  unfold filterAuthorized at hx
+  rw [Array.toList_filter, List.mem_filter] at hx
+  have hpred := hx.2
+  cases hg : guard pol p a (toResource x) with
+  | error _ => simp [hg] at hpred
+  | ok auth => exact guard_sound pol p a (toResource x) auth hg
 
 end Leant.Authz.Theorems

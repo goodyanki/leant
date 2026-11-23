@@ -1,6 +1,8 @@
 import Std.Sync.Mutex
 import Lean.Data.Json
 import Leant
+import Saas
+import LeantTest.NegativeCompile
 
 open Leant
 open Leant.Binding
@@ -410,21 +412,33 @@ private def testSecurityAndAuthzIntegration : IO Unit := do
   let rnd ← randomHex 16
   assertEq "CSPRNG randomHex length" rnd.length 32
 
-  -- 2. Signed session token: issue, verify, tamper rejection, expiry rejection
+  -- 2. Signed session token: issue, verify, tamper rejection, expiry boundary (nowSec >= expSec)
   let cfg : SessionConfig := { secret := "super-secret-key", ttlSeconds := 60 }
   let alice : Principal := { id := "u1", tenant := "t1", roles := ["admin"] }
-  let tok := issueToken cfg alice (nowSec := 1000)
-  match verifyToken cfg.secret tok (nowSec := 1030) with
-  | .ok claims => assertEq "session verify principal" claims.principal alice
+  let tok := issueTokenAt cfg alice 1000
+  match verifyTokenWithConfig cfg tok 1059 with
+  | .ok claims => assertEq "session verify principal before boundary" claims.principal alice
   | .error e => throw <| IO.userError s!"FAIL [session verify]: {e}"
 
   let tampered := tok ++ "0"
   assertTrue "session rejects tampered signature"
-    (match verifyToken cfg.secret tampered (nowSec := 1030) with | .error _ => true | .ok _ => false)
+    (match verifyToken cfg.secret tampered 1030 with | .error _ => true | .ok _ => false)
   assertTrue "session rejects wrong secret"
-    (match verifyToken "wrong-key" tok (nowSec := 1030) with | .error _ => true | .ok _ => false)
-  assertTrue "session rejects expired token"
-    (match verifyToken cfg.secret tok (nowSec := 1061) with | .error _ => true | .ok _ => false)
+    (match verifyToken "wrong-key" tok 1030 with | .error _ => true | .ok _ => false)
+  assertTrue "session rejects token at exact expiry boundary (now == exp)"
+    (match verifyTokenWithConfig cfg tok 1060 with | .error _ => true | .ok _ => false)
+  assertTrue "session rejects expired token (now > exp)"
+    (match verifyTokenWithConfig cfg tok 1061 with | .error _ => true | .ok _ => false)
+  let noExpTok := signClaims cfg.secret { principal := alice, expSec := 0 }
+  assertTrue "session rejects non-expiring token when ttlSeconds > 0"
+    (match verifyTokenWithConfig cfg noExpTok 1030 with | .error _ => true | .ok _ => false)
+
+  -- Default wall-clock issuance produces expSec > 0 and verifies immediately
+  let liveTok ← issueToken cfg alice
+  let nowWall ← systemClock
+  match verifyTokenWithConfig cfg liveTok nowWall with
+  | .ok claims => assertTrue "wall-clock issued token records positive expSec" (claims.expSec > 0)
+  | .error e => throw <| IO.userError s!"FAIL [wall-clock token]: {e}"
 
   -- 3. PolicyDiff auditing
   let pol1 : Policy := { roleRules := [("admin", .delete, "doc")], ownerActions := [.update] }
@@ -434,20 +448,25 @@ private def testSecurityAndAuthzIntegration : IO Unit := do
   assertEq "PolicyDiff addedForbidRules" diff.addedForbidRules [("suspended", .delete, "doc")]
   assertTrue "PolicyDiff non-empty" (!diff.isEmpty)
 
-  -- 4. Auth middleware + declarative `requires` macro + CSRF + RateLimit
+  -- 4. Auth middleware (with injectable per-request clock) + `requires` macro + CSRF + RateLimit
   let rlMw ← makeRateLimit { capacity := 2, refillPerSec := 1 }
   let docRes : Resource := { kind := "doc", owner := "u2", tenant := "t1" }
   let bob : Principal := { id := "u2", tenant := "t1", roles := ["member"] }
-  let bobTok := issueToken cfg bob
-  let aliceTok := issueToken cfg alice
   let outsider : Principal := { id := "u9", tenant := "t2", roles := ["admin"] }
-  let outsiderTok := issueToken cfg outsider
+
+  let clockRef ← IO.mkRef (1000 : Nat)
+  let testClock : Clock := clockRef.get
+  let bobTok ← issueToken cfg bob testClock
+  let aliceTok ← issueToken cfg alice testClock
+  let outsiderTok ← issueToken cfg outsider testClock
 
   let app := Leant.new
     |>.group "/secure" (·
-      |>.get "/del" (authenticate cfg fun ac =>
+      |>.get "/del" (authenticate cfg (fun ac =>
         requires pol2 ac.principal .delete on docRes with _auth =>
-          ac.ctx.text "deleted"))
+          ac.ctx.text "deleted") testClock)
+      |>.get "/whoami" (authenticate cfg (fun ac =>
+        ac.ctx.text ac.principal.id) testClock))
     |>.group "/csrf" (·
       |>.use (csrf {})
       |>.get "/open" (fun c => c.text "ok")
@@ -469,6 +488,19 @@ private def testSecurityAndAuthzIntegration : IO Unit := do
   let rOutsider ← Testing.get app "/secure/del" "" #[("Authorization", s!"Bearer {outsiderTok}")]
   assertEq "requires cross-tenant admin denied -> 403" rOutsider.status Status.forbidden
 
+  -- Same registered route enforces per-request TTL boundary for BOTH Bearer and Cookie
+  clockRef.set 1059
+  let rBearerOk ← Testing.get app "/secure/whoami" "" #[("Authorization", s!"Bearer {aliceTok}")]
+  assertEq "route TTL before expiry (Bearer) -> 200" rBearerOk.status Status.ok
+  let rCookieOk ← Testing.get app "/secure/whoami" "" #[("Cookie", s!"leant_session={aliceTok}")]
+  assertEq "route TTL before expiry (Cookie) -> 200" rCookieOk.status Status.ok
+
+  clockRef.set 1060 -- exact expiry boundary (issuedAt=1000 + ttl=60)
+  let rBearerExp ← Testing.get app "/secure/whoami" "" #[("Authorization", s!"Bearer {aliceTok}")]
+  assertEq "route TTL at expiry boundary (Bearer) -> 401" rBearerExp.status Status.unauthorized
+  let rCookieExp ← Testing.get app "/secure/whoami" "" #[("Cookie", s!"leant_session={aliceTok}")]
+  assertEq "route TTL at expiry boundary (Cookie) -> 401" rCookieExp.status Status.unauthorized
+
   -- CSRF middleware
   let rCsrfGet ← Testing.get app "/csrf/open"
   assertEq "CSRF safe GET -> 200" rCsrfGet.status Status.ok
@@ -487,6 +519,104 @@ private def testSecurityAndAuthzIntegration : IO Unit := do
   assertEq "rateLimit #2 -> 200" rRl2.status Status.ok
   assertEq "rateLimit #3 -> 429" rRl3.status Status.tooManyRequests
 
+private def parseJsonStringField (body : String) (field : String) : IO String := do
+  match Lean.Json.parse body with
+  | .error e => throw <| IO.userError s!"invalid JSON: {e}"
+  | .ok j =>
+    match j.getObjValAs? String field with
+    | .ok v => pure v
+    | .error e => throw <| IO.userError s!"missing string field '{field}': {e}"
+
+private def parseJsonIntField (body : String) (field : String) : IO Int := do
+  match Lean.Json.parse body with
+  | .error e => throw <| IO.userError s!"invalid JSON: {e}"
+  | .ok j =>
+    match j.getObjValAs? Int field with
+    | .ok v => pure v
+    | .error e => throw <| IO.userError s!"missing int field '{field}': {e}"
+
+open Leant.Authz Leant.Security.Session in
+private def testSaasSessionAndReadPolicy : IO Unit := do
+  -- Tightened read policy: `admin` may read any tenant doc, while `member` may read ONLY owned docs.
+  let ownerOnlyReadPolicy : Policy := {
+    roleRules := [
+      ("admin",  .read,   "document"),
+      ("admin",  .create, "document"),
+      ("admin",  .update, "document"),
+      ("admin",  .delete, "document"),
+      ("member", .create, "document")
+    ]
+    ownerActions := [.read, .update, .delete]
+    forbidRules := saasPolicy.forbidRules
+  }
+
+  let clockRef ← IO.mkRef (5000 : Nat)
+  let app ← buildSaasApp ":memory:" "test-saas-secret" false ownerOnlyReadPolicy 120 clockRef.get
+
+  -- 1. Login as alice (admin, tenant-a) and bob (member, tenant-a)
+  let rLoginAlice ← Testing.postJson app "/auth/login" "{\"user\":\"alice\"}"
+  assertEq "SaaS login alice -> 200" rLoginAlice.status Status.ok
+  let aliceTok ← parseJsonStringField rLoginAlice.bodyText "token"
+
+  let rLoginBob ← Testing.postJson app "/auth/login" "{\"user\":\"bob\"}"
+  assertEq "SaaS login bob -> 200" rLoginBob.status Status.ok
+  let bobTok ← parseJsonStringField rLoginBob.bodyText "token"
+
+  -- 2. Seed two documents in the SAME tenant (`tenant-a`), one owned by alice and one by bob
+  let rDocAlice ← Testing.run app
+    (Request.make .post "/api/v1/docs" ""
+      #[("Authorization", s!"Bearer {aliceTok}"), ("Content-Type", "application/json")]
+      "{\"title\":\"Alice Private\",\"content\":\"top-secret\"}")
+  assertEq "SaaS create alice doc -> 201" rDocAlice.status Status.created
+  let aliceDocId ← parseJsonIntField rDocAlice.bodyText "id"
+
+  let rDocBob ← Testing.run app
+    (Request.make .post "/api/v1/docs" ""
+      #[("Authorization", s!"Bearer {bobTok}"), ("Content-Type", "application/json")]
+      "{\"title\":\"Bob Owned\",\"content\":\"draft\"}")
+  assertEq "SaaS create bob doc -> 201" rDocBob.status Status.created
+  let bobDocId ← parseJsonIntField rDocBob.bodyText "id"
+
+  -- 3. Bob's list & detail responses MUST agree under tightened read policy
+  let rBobList ← Testing.get app "/api/v1/docs" "" #[("Authorization", s!"Bearer {bobTok}")]
+  assertEq "SaaS bob list -> 200" rBobList.status Status.ok
+  match Lean.Json.parse rBobList.bodyText with
+  | .ok (.arr elems) =>
+    assertEq "SaaS bob list contains only 1 permitted doc" elems.size 1
+  | _ => throw <| IO.userError s!"FAIL [SaaS bob list]: expected JSON array, got {rBobList.bodyText}"
+  assertTrue "SaaS bob list contains Bob Owned"
+    ((rBobList.bodyText.splitOn "Bob Owned").length >= 2)
+  assertTrue "SaaS bob list excludes Alice Private"
+    ((rBobList.bodyText.splitOn "Alice Private").length == 1)
+
+  let rBobOwnDetail ← Testing.get app s!"/api/v1/docs/{bobDocId}" "" #[("Authorization", s!"Bearer {bobTok}")]
+  assertEq "SaaS bob detail on owned doc -> 200" rBobOwnDetail.status Status.ok
+  let rBobOtherDetail ← Testing.get app s!"/api/v1/docs/{aliceDocId}" "" #[("Authorization", s!"Bearer {bobTok}")]
+  assertEq "SaaS bob detail on unpermitted tenant doc -> 403" rBobOtherDetail.status Status.forbidden
+
+  -- 4. Alice (admin) sees both documents in list and detail
+  let rAliceList ← Testing.get app "/api/v1/docs" "" #[("Authorization", s!"Bearer {aliceTok}")]
+  assertEq "SaaS alice list -> 200" rAliceList.status Status.ok
+  match Lean.Json.parse rAliceList.bodyText with
+  | .ok (.arr elems) =>
+    assertEq "SaaS alice list contains both tenant docs" elems.size 2
+  | _ => throw <| IO.userError s!"FAIL [SaaS alice list]: expected JSON array, got {rAliceList.bodyText}"
+  let rAliceDetailBob ← Testing.get app s!"/api/v1/docs/{bobDocId}" "" #[("Authorization", s!"Bearer {aliceTok}")]
+  assertEq "SaaS alice detail on bob doc -> 200" rAliceDetailBob.status Status.ok
+
+  -- 5. SaaS session TTL boundary through `/auth/login` + `/api/v1/docs` (Bearer & Cookie)
+  clockRef.set 5119
+  let rSaasBearerOk ← Testing.get app "/api/v1/docs" "" #[("Authorization", s!"Bearer {bobTok}")]
+  assertEq "SaaS TTL before expiry (Bearer) -> 200" rSaasBearerOk.status Status.ok
+  let rSaasCookieOk ← Testing.get app "/api/v1/docs" "" #[("Cookie", s!"leant_session={bobTok}")]
+  assertEq "SaaS TTL before expiry (Cookie) -> 200" rSaasCookieOk.status Status.ok
+
+  clockRef.set 5120 -- exact expiry boundary (5000 + 120)
+  let rSaasBearerExp ← Testing.get app "/api/v1/docs" "" #[("Authorization", s!"Bearer {bobTok}")]
+  assertEq "SaaS TTL at expiry boundary (Bearer) -> 401" rSaasBearerExp.status Status.unauthorized
+  let rSaasCookieExp ← Testing.get app "/api/v1/docs" "" #[("Cookie", s!"leant_session={bobTok}")]
+  assertEq "SaaS TTL at expiry boundary (Cookie) -> 401" rSaasCookieExp.status Status.unauthorized
+
 section MacroTests
 open Leant.Data
 
@@ -500,11 +630,106 @@ leant_tenant_table ArticlesTable "articles" (tenant_id : ScalarType.text) where
   | author_id : SqlType.int
   | title     : SqlType.text
 
+leant_tenant_table OrdersTable "join_orders" (tenant_id : ScalarType.text) where
+  | id        : SqlType.int  [pk, auto]
+  | tenant_id : SqlType.text
+  | ext_key   : SqlType.int
+  | title     : SqlType.text
+
+leant_tenant_table InvoicesTable "join_invoices" (tenant_id : ScalarType.text) where
+  | id        : SqlType.int  [pk, auto]
+  | tenant_id : SqlType.text
+  | ext_key   : SqlType.int
+  | amount    : SqlType.int
+
 end MacroTests
+
+open Leant.Data in
+private def testTenantJoinIsolation {δ : Type} [Driver δ] (backend : String) (pool : Pool δ) : IO Unit := do
+  pool.migrateTable OrdersTable.table
+  pool.migrateTable InvoicesTable.table
+
+  -- Tenant t-1 orders:
+  --   ext_key=100 -> has matching invoice in t-1 (111) AND overlapping invoice in t-2 (999)
+  --   ext_key=200 -> NO invoice in t-1, ONLY overlapping invoice in t-2 (888)
+  --   ext_key=300 -> NO invoice in any tenant
+  let _ ← pool.insert <| InsertQuery.into OrdersTable.table
+    |>.set OrdersTable.tenant_id "t-1"
+    |>.set OrdersTable.ext_key 100
+    |>.set OrdersTable.title "t1-matched"
+  let _ ← pool.insert <| InsertQuery.into OrdersTable.table
+    |>.set OrdersTable.tenant_id "t-1"
+    |>.set OrdersTable.ext_key 200
+    |>.set OrdersTable.title "t1-overlap-foreign"
+  let _ ← pool.insert <| InsertQuery.into OrdersTable.table
+    |>.set OrdersTable.tenant_id "t-1"
+    |>.set OrdersTable.ext_key 300
+    |>.set OrdersTable.title "t1-unmatched"
+
+  let _ ← pool.insert <| InsertQuery.into InvoicesTable.table
+    |>.set InvoicesTable.tenant_id "t-1"
+    |>.set InvoicesTable.ext_key 100
+    |>.set InvoicesTable.amount 111
+
+  -- Tenant t-2 data using the EXACT SAME overlapping join keys (100, 200)
+  let _ ← pool.insert <| InsertQuery.into OrdersTable.table
+    |>.set OrdersTable.tenant_id "t-2"
+    |>.set OrdersTable.ext_key 100
+    |>.set OrdersTable.title "t2-order-100"
+  let _ ← pool.insert <| InsertQuery.into OrdersTable.table
+    |>.set OrdersTable.tenant_id "t-2"
+    |>.set OrdersTable.ext_key 200
+    |>.set OrdersTable.title "t2-order-200"
+  let _ ← pool.insert <| InsertQuery.into InvoicesTable.table
+    |>.set InvoicesTable.tenant_id "t-2"
+    |>.set InvoicesTable.ext_key 100
+    |>.set InvoicesTable.amount 999
+  let _ ← pool.insert <| InsertQuery.into InvoicesTable.table
+    |>.set InvoicesTable.tenant_id "t-2"
+    |>.set InvoicesTable.ext_key 200
+    |>.set InvoicesTable.amount 888
+
+  -- 1. Scoped INNER JOIN for t-1: must return ONLY (t1-matched, amount=111)
+  let innerQ := JoinQuery.inner OrdersTable.table InvoicesTable.table
+      OrdersTable.ext_key InvoicesTable.ext_key
+    |>.forBothTenants "t-1"
+  let innerRows ← pool.selectJoin innerQ
+  assertEq s!"{backend} INNER JOIN tenant isolation row count" innerRows.size 1
+  -- Projected cols: orders(0:id, 1:tenant_id, 2:ext_key, 3:title), invoices(4:id, 5:tenant_id, 6:ext_key, 7:amount)
+  assertTrue s!"{backend} INNER JOIN left title"
+    ((innerRows[0]?.bind (·[3]?)) == some (.text "t1-matched"))
+  assertTrue s!"{backend} INNER JOIN right tenant"
+    ((innerRows[0]?.bind (·[5]?)) == some (.text "t-1"))
+  assertTrue s!"{backend} INNER JOIN right amount (no cross-tenant match)"
+    ((innerRows[0]?.bind (·[7]?)) == some (.int 111))
+
+  -- 2. Scoped LEFT JOIN for t-1: must isolate BOTH sides AND retain all 3 t-1 orders
+  let leftQ := JoinQuery.left OrdersTable.table InvoicesTable.table
+      OrdersTable.ext_key InvoicesTable.ext_key
+    |>.forBothTenants "t-1"
+  let leftRows ← pool.selectJoin leftQ
+  assertEq s!"{backend} LEFT JOIN retains all 3 t-1 rows (0 t-2 rows)" leftRows.size 3
+
+  let allLeftT1 := leftRows.all fun r => r[1]? == some (.text "t-1")
+  assertTrue s!"{backend} LEFT JOIN all left rows belong to t-1" allLeftT1
+
+  let noForeignRight := leftRows.all fun r =>
+    r[5]? == some (.text "t-1") || r[5]? == some .null
+  assertTrue s!"{backend} LEFT JOIN right rows are either t-1 or NULL" noForeignRight
+
+  let row100 := leftRows.find? fun r => r[2]? == some (.int 100)
+  let row200 := leftRows.find? fun r => r[2]? == some (.int 200)
+  let row300 := leftRows.find? fun r => r[2]? == some (.int 300)
+  assertTrue s!"{backend} LEFT JOIN key=100 matched t-1 invoice (111)"
+    ((row100.bind (·[7]?)) == some (.int 111))
+  assertTrue s!"{backend} LEFT JOIN key=200 retained unmatched (foreign t-2 invoice blocked)"
+    ((row200.bind (·[7]?)) == some .null)
+  assertTrue s!"{backend} LEFT JOIN key=300 retained unmatched"
+    ((row300.bind (·[7]?)) == some .null)
 
 open Leant.Data Leant.Data.Migration Leant.Security Leant.Static in
 private def testV05Features : IO Unit := do
-  -- 1. Declarative table macros + multi-table SQL JOIN on SQLite
+  -- 1. Declarative table macros + scope-checked multi-table SQL JOIN on SQLite
   let pool ← Pool.createSqlite ":memory:"
   pool.migrateTable AuthorsTable.table
   pool.migrateTable ArticlesTable.table
@@ -518,15 +743,18 @@ private def testV05Features : IO Unit := do
 
   let joinQ := JoinQuery.inner ArticlesTable.table AuthorsTable.table
       ArticlesTable.author_id AuthorsTable.id
-    |>.filter (.eq (.left ArticlesTable.tenant_id) "t-1")
+    |>.forLeftTenant "t-1"
     |>.limit 5
-  let joinRows ← pool.withConn fun conn => Driver.query conn joinQ.render
+  let joinRows ← pool.selectJoin joinQ
   assertEq "JOIN query row count" joinRows.size 1
   -- Projected columns: articles(id, tenant_id, author_id, title), authors(id, name) -> idx 3 = title, idx 5 = author name
   assertTrue "JOIN projected article title"
     ((joinRows[0]?.bind (·[3]?)) == some (.text "Verified Web Frameworks"))
   assertTrue "JOIN projected author name"
     ((joinRows[0]?.bind (·[5]?)) == some (.text "Ada Lovelace"))
+
+  -- Two-tenant overlapping-key INNER & LEFT JOIN isolation on SQLite
+  testTenantJoinIsolation "SQLite" pool
 
   -- 2. Schema diff & versioned migrations (migrateUp + rollbackLast)
   let sV1 : Schema := {
@@ -558,10 +786,12 @@ private def testV05Features : IO Unit := do
   let vers ← appliedVersions pool
   assertEq "appliedVersions after rollback" vers #[1]
 
-  -- 3. PostgreSQL placeholder translation
+  -- 3. PostgreSQL placeholder translation & dialect DDL
   assertEq "toPostgresPlaceholders"
     (toPostgresPlaceholders "SELECT id FROM users WHERE tenant_id = ? AND id = ? LIMIT ?")
     "SELECT id FROM users WHERE tenant_id = $1 AND id = $2 LIMIT $3"
+  assertEq "SQLite beginTransactionSql" (Driver.beginTransactionSql (δ := SqliteConn)) "BEGIN IMMEDIATE"
+  assertEq "Postgres beginTransactionSql" (Driver.beginTransactionSql (δ := PgConn)) "BEGIN"
 
   -- 4. Argon2id password hashing & constant-time verification
   let phc ← Password.hash "correct-horse-battery-staple"
@@ -588,6 +818,103 @@ private def testV05Features : IO Unit := do
   let rEsc ← Testing.get staticApp "/assets/../etc/passwd"
   assertEq "static traversal blocked 404" rEsc.status Status.notFound
 
+open Leant.Data Leant.Data.Migration in
+private def testPostgresIntegration : IO Unit := do
+  match ← IO.getEnv "LEANT_TEST_PG_URL" with
+  | none =>
+    if (← IO.getEnv "LEANT_REQUIRE_PG") == some "1" then
+      throw <| IO.userError "FAIL [Postgres]: LEANT_REQUIRE_PG=1 but LEANT_TEST_PG_URL is not set"
+    IO.println "SKIP [Postgres integration]: LEANT_TEST_PG_URL not set"
+  | some pgUrl =>
+    let pool ← Pool.createPostgres pgUrl { maxSize := 2 }
+    -- Clean slate before integration assertions
+    pool.withConn fun conn => do
+      for tbl in ["pg_tx_items", "pg_mig_widgets", "_leant_migrations", "join_orders", "join_invoices"] do
+        Driver.exec conn { sql := s!"DROP TABLE IF EXISTS {tbl}", params := #[] }
+
+    let pgSchema : Schema := {
+      tableName := ⟨"pg_tx_items", by decide⟩
+      cols := [
+        { name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true, isAutoIncrement := true },
+        { name := ⟨"tenant_id", by decide⟩, ty := .text },
+        { name := ⟨"title", by decide⟩, ty := .text },
+        { name := ⟨"active", by decide⟩, ty := .bool },
+        { name := ⟨"note", by decide⟩, ty := .nullableText }
+      ]
+    }
+    let colId : ColRef pgSchema .int := ⟨0, _, rfl, rfl⟩
+    let colTenant : ColRef pgSchema .text := ⟨1, _, rfl, rfl⟩
+    let colTitle : ColRef pgSchema .text := ⟨2, _, rfl, rfl⟩
+    let colActive : ColRef pgSchema .bool := ⟨3, _, rfl, rfl⟩
+    let colNote : ColRef pgSchema .nullableText := ⟨4, _, rfl, rfl⟩
+    let pgTable : Table (.tenantScoped .text) := { schema := pgSchema, tenantCol := colTenant }
+
+    pool.migrateTable pgTable
+
+    -- 1. Transaction COMMIT contract on real PostgreSQL
+    let committedId ← pool.withTransaction fun conn => do
+      Pool.insertOn conn <| InsertQuery.into pgTable
+        |>.set colTenant "pg-t1"
+        |>.set colTitle "committed-row"
+        |>.set colActive true
+        |>.set colNote none
+    assertTrue "Postgres tx COMMIT returned positive BIGSERIAL id" (committedId > 0)
+
+    let afterCommit ← pool.select (SelectQuery.fromTable pgTable |>.filter (colId ==. committedId) |>.forTenant "pg-t1")
+    assertEq "Postgres tx COMMIT persisted 1 row" afterCommit.size 1
+    assertTrue "Postgres Bool roundtrip"
+      ((afterCommit[0]?.bind (·[3]?)) == some (.bool true))
+    assertTrue "Postgres NULL roundtrip"
+      ((afterCommit[0]?.bind (·[4]?)) == some .null)
+
+    -- 2. Transaction ROLLBACK-on-error contract on real PostgreSQL
+    let rolledBack ←
+      try
+        pool.withTransaction fun conn => do
+          let _ ← Pool.insertOn conn <| InsertQuery.into pgTable
+            |>.set colTenant "pg-t1"
+            |>.set colTitle "should-rollback"
+            |>.set colActive false
+            |>.set colNote (some "ephemeral")
+          throw (IO.userError "simulated postgres tx failure")
+        pure false
+      catch _ =>
+        pure true
+    assertTrue "Postgres tx ROLLBACK caught error" rolledBack
+
+    let afterRollback ← pool.select (SelectQuery.fromTable pgTable |>.forTenant "pg-t1")
+    assertEq "Postgres tx ROLLBACK discarded uncommitted row" afterRollback.size 1
+
+    -- 3. Versioned migrations (migrateUp + idempotency + rollbackLast) on real PostgreSQL
+    let mV1 : Schema := {
+      tableName := ⟨"pg_mig_widgets", by decide⟩
+      cols := [{ name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true }]
+    }
+    let mV2 : Schema := {
+      tableName := ⟨"pg_mig_widgets", by decide⟩
+      cols := [
+        { name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true },
+        { name := ⟨"label", by decide⟩, ty := .nullableText }
+      ]
+    }
+    let pgMigrations : List Migration := [
+      { version := 1, name := "create_pg_widgets"
+      , up := [.createTable mV1], down := [.dropTable mV1.tableName] },
+      { version := 2, name := "add_pg_label"
+      , up := diffSchema mV1 mV2, down := [] }
+    ]
+    let pgApp1 ← migrateUp pool pgMigrations
+    assertEq "Postgres migrateUp applied [1, 2]" pgApp1 #[1, 2]
+    let pgApp2 ← migrateUp pool pgMigrations
+    assertEq "Postgres migrateUp idempotent []" pgApp2 #[]
+    let pgRolled ← rollbackLast pool pgMigrations
+    assertEq "Postgres rollbackLast version 2" pgRolled (some 2)
+    let pgVers ← appliedVersions pool
+    assertEq "Postgres appliedVersions after rollback" pgVers #[1]
+
+    -- 4. Tenant-scoped INNER & LEFT JOIN isolation on real PostgreSQL
+    testTenantJoinIsolation "Postgres" pool
+
 def main : IO Unit := do
   testTrieRouting
   testCookiesQueryForm
@@ -598,5 +925,7 @@ def main : IO Unit := do
   testSseAndStream
   testVerifiedOrmAndSqlite
   testSecurityAndAuthzIntegration
+  testSaasSessionAndReadPolicy
   testV05Features
+  testPostgresIntegration
   IO.println "All Leant tests passed!"

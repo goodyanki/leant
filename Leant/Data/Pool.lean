@@ -77,11 +77,12 @@ def withConn {δ α : Type} (pool : Pool δ) (action : δ → IO α) : IO α := 
   finally
     pool.release conn
 
-/-- Executes `action` inside an atomic database transaction (`BEGIN IMMEDIATE` / `COMMIT`).
+/-- Executes `action` inside an atomic database transaction using the driver's
+    transaction-opening syntax (`BEGIN IMMEDIATE` for SQLite, `BEGIN` for PostgreSQL).
     Automatically executes `ROLLBACK` if `action` throws an exception. -/
 def withTransaction {δ α : Type} [Driver δ] (pool : Pool δ) (action : δ → IO α) : IO α :=
   pool.withConn fun conn => do
-    Driver.exec conn { sql := "BEGIN IMMEDIATE", params := #[] }
+    Driver.exec conn { sql := Driver.beginTransactionSql (δ := δ), params := #[] }
     try
       let res ← action conn
       Driver.exec conn { sql := "COMMIT", params := #[] }
@@ -146,11 +147,11 @@ def delete {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode} {isSco
     (hscope : ExecutableScope mode isScoped := by trivial) : IO Unit :=
   pool.withConn fun conn => deleteOn conn q hscope
 
-/-- Runs `CREATE TABLE IF NOT EXISTS` for a table's schema on the pool. -/
+/-- Runs dialect-appropriate `CREATE TABLE IF NOT EXISTS` for a table's schema on the pool. -/
 def migrateTable {δ : Type} [Driver δ] {mode : TenantMode}
     (pool : Pool δ) (tbl : Table mode) : IO Unit :=
   pool.withConn fun conn =>
-    Driver.exec conn { sql := tbl.schema.createTableSql, params := #[] }
+    Driver.exec conn { sql := tbl.schema.createTableSqlFor (Driver.dialect (δ := δ)), params := #[] }
 
 end Pool
 end Leant.Data

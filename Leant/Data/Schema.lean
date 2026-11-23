@@ -13,17 +13,23 @@ structure ColDef where
 
 namespace ColDef
 
-/-- Renders a column definition for `CREATE TABLE` DDL. -/
-def ddlColumn (c : ColDef) : String :=
-  let base := c.name.val ++ " " ++ c.ty.ddlType
-  let base := if c.isPrimaryKey then
-    if c.isAutoIncrement then base ++ " PRIMARY KEY AUTOINCREMENT"
-    else base ++ " PRIMARY KEY"
-  else base
+/-- Renders a column definition for `CREATE TABLE` / `ALTER TABLE` DDL in dialect `d`. -/
+def ddlColumnFor (d : SqlDialect) (c : ColDef) : String :=
+  let base :=
+    if c.isPrimaryKey && c.isAutoIncrement then
+      match d with
+      | .sqlite   => c.name.val ++ " " ++ c.ty.ddlTypeFor .sqlite ++ " PRIMARY KEY AUTOINCREMENT"
+      | .postgres => c.name.val ++ " BIGSERIAL PRIMARY KEY"
+    else
+      let colBase := c.name.val ++ " " ++ c.ty.ddlTypeFor d
+      if c.isPrimaryKey then colBase ++ " PRIMARY KEY" else colBase
   let base := if c.isUnique && !c.isPrimaryKey then base ++ " UNIQUE" else base
   match c.checkSql with
   | some chk => base ++ " CHECK (" ++ chk ++ ")"
   | none => base
+
+/-- Renders a column definition for `CREATE TABLE` DDL (defaults to SQLite dialect). -/
+def ddlColumn (c : ColDef) : String := c.ddlColumnFor .sqlite
 
 end ColDef
 
@@ -34,11 +40,14 @@ structure Schema where
 
 namespace Schema
 
-/-- Generates a `CREATE TABLE IF NOT EXISTS` DDL statement from `Schema`. -/
-def createTableSql (s : Schema) : String :=
-  let colDdls := s.cols.map ColDef.ddlColumn
+/-- Generates a `CREATE TABLE IF NOT EXISTS` DDL statement from `Schema` for dialect `d`. -/
+def createTableSqlFor (d : SqlDialect) (s : Schema) : String :=
+  let colDdls := s.cols.map (ColDef.ddlColumnFor d)
   "CREATE TABLE IF NOT EXISTS " ++ s.tableName.val ++
     " (" ++ String.intercalate ", " colDdls ++ ")"
+
+/-- Generates a `CREATE TABLE IF NOT EXISTS` DDL statement from `Schema` (defaults to SQLite dialect). -/
+def createTableSql (s : Schema) : String := s.createTableSqlFor .sqlite
 
 /-- Comma-separated projection list of all column names in schema order. -/
 def allColumnsSql (s : Schema) : String :=

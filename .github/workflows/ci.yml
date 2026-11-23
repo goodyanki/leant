@@ -8,6 +8,20 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: leant
+          POSTGRES_PASSWORD: leant
+          POSTGRES_DB: leant_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +51,10 @@ jobs:
           lake build saas
           lake build bench_leant
 
-      - name: Run unit, formal proof, and in-memory HTTP tests
+      - name: Run unit, formal proof, negative-compile, SQLite, and PostgreSQL integration tests
+        env:
+          LEANT_TEST_PG_URL: postgres://leant:leant@127.0.0.1:5432/leant_test
+          LEANT_REQUIRE_PG: "1"
         run: lake test
 
       - name: Smoke test bench_leant endpoints

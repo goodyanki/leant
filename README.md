@@ -2,7 +2,7 @@
 
 A formally verified backend web framework written in **Lean 4**.
 
-> **Ergonomic Gin-style developer experience + high-throughput Rust (`tokio` + `hyper`) HTTP transport + 30 machine-checked theorems covering routing, SQL injection immunity, row-level tenant isolation, authorization, and static file path safety.**
+> **Ergonomic Gin-style developer experience + high-throughput Rust (`tokio` + `hyper`) HTTP transport + 40 machine-checked theorems covering routing, SQL injection immunity, row-level tenant isolation, authorization, and static file path safety.**
 
 ## Architecture
 
@@ -13,10 +13,10 @@ A formally verified backend web framework written in **Lean 4**.
   - Route groups, onion-model middleware (`logger`, `recovery`, `requestId`, `cors`, `bodyLimit`, `timeout`), secure-default cookies (`HttpOnly; Secure; SameSite=Lax`), SSE/streaming, path-traversal-proof static file serving (`App.static`), and in-memory HTTP testing (`Leant.Testing`).
   - Proof-carrying refined binding types (`NonEmpty`, `Bounded`, `NonEmptyBounded`, `Email`, `PositiveNat`).
 - **Verified ORM (`Leant/Data`)**:
-  - Declarative `leant_table` / `leant_tenant_table` macros, deeply embedded typed `Expr` GADT, `INNER`/`LEFT JOIN` queries, versioned schema migrations (`diffSchema`, `migrateUp`, `rollbackLast`), SQLite & pure-Rust PostgreSQL drivers, connection pooling, transactions, and 11 formal ORM/RLS theorems ([ADR-002](docs/adr/002-verified-orm-design.md)).
+  - Declarative `leant_table` / `leant_tenant_table` macros, deeply embedded typed `Expr` GADT, proof-carrying single-table & `INNER`/`LEFT JOIN` queries, versioned schema migrations (`diffSchema`, `migrateUp`, `rollbackLast`), SQLite & pure-Rust PostgreSQL drivers, connection pooling, dialect-aware transactions, and 20 formal ORM/JOIN/RLS theorems ([ADR-002](docs/adr/002-verified-orm-design.md)).
 - **Verified Authorization & Security (`Leant/Authz`, `Leant/Security`)**:
-  - Pure RBAC + resource ownership + explicit forbid + tenant-isolation policy engine with 10 machine-checked theorems, `Authorized` proof tokens, declarative `requires ... on ... with auth => ...` macro, and `PolicyDiff` auditor.
-  - Pure-Rust audited cryptography (`HMAC-SHA256`, `Argon2id` password hashing, constant-time equality, OS CSPRNG), signed stateless session/bearer tokens, double-submit cookie CSRF protection, and thread-safe token-bucket rate limiting.
+  - Pure RBAC + resource ownership + explicit forbid + tenant-isolation policy engine with 11 machine-checked theorems, `Authorized` proof tokens, `filterAuthorized`, declarative `requires ... on ... with auth => ...` macro, and `PolicyDiff` auditor.
+  - Pure-Rust audited cryptography (`HMAC-SHA256`, `Argon2id` password hashing, constant-time equality, OS CSPRNG), wall-clock TTL-enforced session/bearer tokens, double-submit cookie CSRF protection, and thread-safe token-bucket rate limiting.
 
 ## Quick Start
 

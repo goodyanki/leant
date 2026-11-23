@@ -342,7 +342,7 @@ theorem rls_update_soundness {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
     exact ScalarType.eq_of_beq hmatch.1
 
 /-- Theorem 8 (Semantic RLS Soundness for `DELETE`):
-    A tenant-isScoped `DELETE` can never match a row belonging to another tenant. -/
+    A tenant-scoped `DELETE` can never match a row belonging to another tenant. -/
 theorem rls_delete_soundness {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
     (q : DeleteQuery tbl false) (tid : ty.denote) (env : RowEnv tbl.schema)
     (hmatch : (q.forTenant tid).evalFilter env = true) :
@@ -355,5 +355,30 @@ theorem rls_delete_soundness {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
   | some p =>
     simp [h, Expr.eval, Bool.and_eq_true] at hmatch
     exact ScalarType.eq_of_beq hmatch.1
+
+/-- Theorem 8b (By-Construction Scoped `SELECT` Invariant):
+    Every `SelectQuery tbl true` (regardless of subsequent `.filter`/`.orderBy`/`.limit`/`.offset`
+    combinators) enforces isolation to a single fixed tenant ID by construction. -/
+theorem rls_select_scoped_invariant {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
+    (q : SelectQuery tbl true) :
+    ∃ tid : ty.denote, ∀ env : RowEnv tbl.schema,
+      q.evalFilter env = true → env.get tbl.tenantCol = tid :=
+  q.scopedProof
+
+/-- Theorem 8c (By-Construction Scoped `UPDATE` Invariant):
+    Every `UpdateQuery tbl true` enforces isolation to a single fixed tenant ID by construction. -/
+theorem rls_update_scoped_invariant {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
+    (q : UpdateQuery tbl true) :
+    ∃ tid : ty.denote, ∀ env : RowEnv tbl.schema,
+      q.evalFilter env = true → env.get tbl.tenantCol = tid :=
+  q.scopedProof
+
+/-- Theorem 8d (By-Construction Scoped `DELETE` Invariant):
+    Every `DeleteQuery tbl true` enforces isolation to a single fixed tenant ID by construction. -/
+theorem rls_delete_scoped_invariant {ty : ScalarType} {tbl : Table (.tenantScoped ty)}
+    (q : DeleteQuery tbl true) :
+    ∃ tid : ty.denote, ∀ env : RowEnv tbl.schema,
+      q.evalFilter env = true → env.get tbl.tenantCol = tid :=
+  q.scopedProof
 
 end Leant.Data.Theorems

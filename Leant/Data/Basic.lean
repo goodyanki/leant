@@ -1,5 +1,11 @@
 namespace Leant.Data
 
+/-- Target SQL backend dialect for DDL and transaction syntax. -/
+inductive SqlDialect where
+  | sqlite
+  | postgres
+  deriving Repr, DecidableEq, Inhabited
+
 /-- Non-null comparable SQL scalar types (immune to SQL tri-valued NULL equality pitfalls). -/
 inductive ScalarType where
   | int
@@ -16,11 +22,14 @@ def denote : ScalarType → Type
   | .text => String
   | .bool => Bool
 
-/-- SQL DDL type name for a `ScalarType`. -/
-def sqlName : ScalarType → String
-  | .int  => "INTEGER"
+/-- Dialect-specific SQL DDL type name for a `ScalarType`. -/
+def sqlNameFor (d : SqlDialect) : ScalarType → String
+  | .int  => match d with | .sqlite => "INTEGER" | .postgres => "BIGINT"
   | .text => "TEXT"
-  | .bool => "INTEGER"
+  | .bool => match d with | .sqlite => "INTEGER" | .postgres => "BOOLEAN"
+
+/-- Default (SQLite) SQL DDL type name for a `ScalarType`. -/
+def sqlName : ScalarType → String := sqlNameFor .sqlite
 
 /-- Decidable equality on denoted scalar values. -/
 def decEq : (t : ScalarType) → (a b : t.denote) → Decidable (a = b)
@@ -62,11 +71,14 @@ def denote : SqlType → Type
   | .blob       => ByteArray
   | .nullable s => Option s.denote
 
-/-- SQL DDL column type string (including `NOT NULL` for non-nullable types). -/
-def ddlType : SqlType → String
-  | .scalar s   => s.sqlName ++ " NOT NULL"
-  | .blob       => "BLOB NOT NULL"
-  | .nullable s => s.sqlName
+/-- Dialect-specific SQL DDL column type string (including `NOT NULL` for non-nullable types). -/
+def ddlTypeFor (d : SqlDialect) : SqlType → String
+  | .scalar s   => s.sqlNameFor d ++ " NOT NULL"
+  | .blob       => match d with | .sqlite => "BLOB NOT NULL" | .postgres => "BYTEA NOT NULL"
+  | .nullable s => s.sqlNameFor d
+
+/-- Default (SQLite) SQL DDL column type string. -/
+def ddlType : SqlType → String := ddlTypeFor .sqlite
 
 end SqlType
 
@@ -174,10 +186,16 @@ instance : ToString DbError := ⟨DbError.message⟩
 
 end DbError
 
-/-- Abstract database driver interface implemented by SQLite / PostgreSQL backends. -/
+/-- Low-level database driver interface implemented by SQLite / PostgreSQL backends.
+    **Trust Boundary**: Calling `Driver.exec` or `Driver.query` directly with raw `RenderedQuery`
+    bypasses compile-time `ExecutableScope` and `ScopeInvariant` enforcement.
+    Application code should always use the scope-checked `Pool.select`, `Pool.selectModels`,
+    `Pool.selectJoin`, `Pool.update`, and `Pool.delete` APIs instead. -/
 class Driver (δ : Type) where
   exec : δ → RenderedQuery → IO Unit
   query : δ → RenderedQuery → IO (Array (Array SqlValue))
   lastInsertRowId : δ → IO Int
+  dialect : SqlDialect := .sqlite
+  beginTransactionSql : String := "BEGIN"
 
 end Leant.Data

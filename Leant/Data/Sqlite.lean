@@ -44,5 +44,7 @@ instance : Driver SqliteConn where
   exec := SqliteConn.exec
   query := SqliteConn.query
   lastInsertRowId := SqliteConn.lastInsertRowId
+  dialect := .sqlite
+  beginTransactionSql := "BEGIN IMMEDIATE"
 
 end Leant.Data

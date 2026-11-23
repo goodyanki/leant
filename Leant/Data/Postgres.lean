@@ -43,15 +43,19 @@ def exec (conn : PgConn) (q : RenderedQuery) : IO Unit :=
 def query (conn : PgConn) (q : RenderedQuery) : IO (Array (Array SqlValue)) :=
   queryRaw conn (toPostgresPlaceholders q.sql) q.params
 
-/-- Retrieves the last generated sequence ID (`SELECT LASTVAL()`). -/
+/-- Retrieves the last generated sequence ID (`SELECT LASTVAL()`).
+    Returns `0` if no sequence has been advanced in the current session (e.g. tables with explicit PKs). -/
 def lastInsertRowId (conn : PgConn) : IO Int := do
-  let rows ← queryRaw conn "SELECT LASTVAL()" #[]
-  match rows[0]? with
-  | some row =>
-    match row[0]? with
-    | some (SqlValue.int id) => pure id
-    | _ => pure 0
-  | none => pure 0
+  try
+    let rows ← queryRaw conn "SELECT LASTVAL()" #[]
+    match rows[0]? with
+    | some row =>
+      match row[0]? with
+      | some (SqlValue.int id) => pure id
+      | _ => pure 0
+    | none => pure 0
+  catch _ =>
+    pure 0
 
 end PgConn
 
@@ -59,6 +63,8 @@ instance : Driver PgConn where
   exec := PgConn.exec
   query := PgConn.query
   lastInsertRowId := PgConn.lastInsertRowId
+  dialect := .postgres
+  beginTransactionSql := "BEGIN"
 
 namespace Pool
 

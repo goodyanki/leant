@@ -50,8 +50,15 @@ def commonLinkArgs : Array String := #[
 lean_lib Leant where
   moreLinkArgs := commonLinkArgs
 
+lean_lib Saas where
+  srcDir := "examples/saas"
+  moreLinkArgs := commonLinkArgs
+
+lean_lib LeantTest where
+  moreLinkArgs := commonLinkArgs
+
 @[test_driver]
-lean_exe LeantTest where
+lean_exe LeantTestRunner where
   root := `LeantTest.Main
   moreLinkArgs := commonLinkArgs
 
@@ -67,7 +74,7 @@ lean_exe todo where
 
 lean_exe saas where
   srcDir := "examples/saas"
-  root := `Saas
+  root := `SaasMain
   moreLinkArgs := commonLinkArgs
 
 lean_exe bench_leant where

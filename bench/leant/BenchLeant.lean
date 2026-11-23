@@ -93,7 +93,7 @@ def main : IO Unit := do
 
   let sessionCfg : SessionConfig := { secret, secureCookie := false }
   let benchPrincipal : Principal := { id := "u-alice", tenant := "tenant-a", roles := ["admin"] }
-  let sampleToken := issueToken sessionCfg benchPrincipal
+  let sampleToken ← issueToken sessionCfg benchPrincipal
   if let some tokenFile := ← IO.getEnv "TOKEN_OUT" then
     IO.FS.writeFile tokenFile sampleToken
 

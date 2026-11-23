@@ -526,8 +526,52 @@ pub extern "C" fn leant_rust_argon2_verify(
 
 /* ---------- Pure-Rust PostgreSQL Wire-Protocol Client ---------- */
 
-use postgres::types::ToSql;
+use postgres::types::{IsNull, ToSql, Type};
 use postgres::{Client, NoTls};
+
+#[derive(Debug)]
+struct AnyNull;
+
+static ANY_NULL: AnyNull = AnyNull;
+
+impl ToSql for AnyNull {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        _out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(IsNull::Yes)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+#[derive(Debug)]
+struct FlexInt(i64);
+
+impl ToSql for FlexInt {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match *ty {
+            Type::INT2 => i16::try_from(self.0)?.to_sql(ty, out),
+            Type::INT4 => i32::try_from(self.0)?.to_sql(ty, out),
+            _ => self.0.to_sql(ty, out),
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::INT2 | Type::INT4 | Type::INT8)
+    }
+
+    postgres::types::to_sql_checked!();
+}
 
 #[repr(C)]
 pub struct PgParamC {
@@ -557,7 +601,7 @@ pub struct PgResultSetC {
 
 enum OwnedPgParam {
     Null,
-    Int(i64),
+    Int(FlexInt),
     Text(String),
     Bool(bool),
     Blob(Vec<u8>),
@@ -566,7 +610,7 @@ enum OwnedPgParam {
 impl OwnedPgParam {
     fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
         match self {
-            OwnedPgParam::Null => &None::<String>,
+            OwnedPgParam::Null => &ANY_NULL,
             OwnedPgParam::Int(v) => v,
             OwnedPgParam::Text(s) => s,
             OwnedPgParam::Bool(b) => b,
@@ -595,7 +639,7 @@ fn decode_c_params(params_ptr: *const PgParamC, params_len: usize) -> Vec<OwnedP
     let mut out = Vec::with_capacity(params_len);
     for p in slice_params {
         match p.tag {
-            1 => out.push(OwnedPgParam::Int(p.int_val)),
+            1 => out.push(OwnedPgParam::Int(FlexInt(p.int_val))),
             2 => {
                 let s = if p.bytes_ptr.is_null() || p.bytes_len == 0 {
                     String::new()

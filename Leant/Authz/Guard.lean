@@ -1,5 +1,6 @@
 import Leant.Core.Context
 import Leant.Data.Query
+import Leant.Data.Join
 import Leant.Authz.Basic
 import Leant.Security.Session
 
@@ -29,12 +30,15 @@ def extractToken (cfg : SessionConfig) (c : Context) : Option String :=
     c.cookie? cfg.cookieName
 
 /-- Wraps an `AuthHandler` into a standard `Handler` by verifying the signed Bearer token
-    or session cookie (returns `401 Unauthorized` if missing, tampered, or expired). -/
-def authenticate (cfg : SessionConfig) (h : AuthHandler) (nowSec : Nat := 0) : Handler := fun c => do
+    or session cookie on each request using `clock` (defaults to wall-clock `systemClock`).
+    Returns `401 Unauthorized` if credentials are missing, tampered, missing expiry (when
+    `cfg.ttlSeconds > 0`), or expired (`nowSec >= expSec`). -/
+def authenticate (cfg : SessionConfig) (h : AuthHandler) (clock : Clock := systemClock) : Handler := fun c => do
   match extractToken cfg c with
   | none => throw (.unauthorized "missing authentication credentials")
   | some tok =>
-    match verifyToken cfg.secret tok nowSec with
+    let nowSec ← clock
+    match verifyTokenWithConfig cfg tok nowSec with
     | .error msg => throw (.unauthorized msg)
     | .ok claims => h { ctx := c, principal := claims.principal }
 
@@ -50,6 +54,15 @@ def withGuard (pol : Policy) (p : Principal) (a : Action) (r : Resource)
     (k : Authorized pol p a r → HandlerM Response) : HandlerM Response := do
   let auth ← guardM pol p a r
   k auth
+
+/-- Filters a collection of domain items to only those for which `guard pol p a (toResource item)`
+    succeeds, keeping list/collection endpoints aligned with single-item `requires` guards. -/
+def filterAuthorized {α : Type} (pol : Policy) (p : Principal) (a : Action)
+    (toResource : α → Resource) (items : Array α) : Array α :=
+  items.filter fun item =>
+    match guard pol p a (toResource item) with
+    | .ok _ => true
+    | .error _ => false
 
 /-- Declarative authorization guard macro:
     `requires pol principal .delete on resource with auth => body`
@@ -76,5 +89,26 @@ def scopeUpdate {tbl : Table (.tenantScoped .text)}
 def scopeDelete {tbl : Table (.tenantScoped .text)}
     (q : DeleteQuery tbl false) (p : Principal) : DeleteQuery tbl true :=
   q.forTenant p.tenant
+
+/-- Scopes the left table of a `JoinQuery` to `principal.tenant`. -/
+def scopeJoinLeft {m₂ : TenantMode} {tbl₁ : Table (.tenantScoped .text)} {tbl₂ : Table m₂}
+    {joinTy : ScalarType} {rs : Bool}
+    (q : JoinQuery tbl₁ tbl₂ joinTy false rs) (p : Principal) :
+    JoinQuery tbl₁ tbl₂ joinTy true rs :=
+  q.forLeftTenant p.tenant
+
+/-- Scopes the right table of a `JoinQuery` to `principal.tenant` (in the `ON` clause). -/
+def scopeJoinRight {m₁ : TenantMode} {tbl₁ : Table m₁} {tbl₂ : Table (.tenantScoped .text)}
+    {joinTy : ScalarType} {ls : Bool}
+    (q : JoinQuery tbl₁ tbl₂ joinTy ls false) (p : Principal) :
+    JoinQuery tbl₁ tbl₂ joinTy ls true :=
+  q.forRightTenant p.tenant
+
+/-- Scopes both tables of a `JoinQuery` to `principal.tenant`. -/
+def scopeJoinBoth {tbl₁ : Table (.tenantScoped .text)} {tbl₂ : Table (.tenantScoped .text)}
+    {joinTy : ScalarType}
+    (q : JoinQuery tbl₁ tbl₂ joinTy false false) (p : Principal) :
+    JoinQuery tbl₁ tbl₂ joinTy true true :=
+  q.forBothTenants p.tenant
 
 end Leant.Authz
