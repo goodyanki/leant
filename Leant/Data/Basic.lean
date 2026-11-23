@@ -195,6 +195,11 @@ class Driver (δ : Type) where
   exec : δ → RenderedQuery → IO Unit
   query : δ → RenderedQuery → IO (Array (Array SqlValue))
   lastInsertRowId : δ → IO Int
+  /-- Executes a single-row insert. Drivers may return the declared integer primary key
+      directly from the statement. The default uses connection-local rowid semantics. -/
+  insertRow : δ → RenderedQuery → Option SqlIdent → IO Int := fun conn q _ => do
+    exec conn q
+    lastInsertRowId conn
   dialect : SqlDialect := .sqlite
   beginTransactionSql : String := "BEGIN"
 

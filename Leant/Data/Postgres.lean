@@ -57,12 +57,26 @@ def lastInsertRowId (conn : PgConn) : IO Int := do
   catch _ =>
     pure 0
 
+/-- PostgreSQL returns the key of this statement. Tables without an integer primary key
+    retain the integer API's zero sentinel without reading session sequence state. -/
+def insertRow (conn : PgConn) (q : RenderedQuery) (key : Option SqlIdent) : IO Int := do
+  match key with
+  | none =>
+    exec conn q
+    pure 0
+  | some col =>
+    let rows ← query conn { q with sql := q.sql ++ " RETURNING " ++ col.val }
+    match rows with
+    | #[#[.int id]] => pure id
+    | _ => throw (IO.userError "INSERT RETURNING expected one integer primary key")
+
 end PgConn
 
 instance : Driver PgConn where
   exec := PgConn.exec
   query := PgConn.query
   lastInsertRowId := PgConn.lastInsertRowId
+  insertRow := PgConn.insertRow
   dialect := .postgres
   beginTransactionSql := "BEGIN"
 

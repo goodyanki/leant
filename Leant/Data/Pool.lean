@@ -105,11 +105,11 @@ def selectOn {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode} {isS
     IO (Array (Array SqlValue)) :=
   Driver.query conn q.render
 
-/-- Executes a typed `INSERT` on a borrowed connection and returns `lastInsertRowId`. -/
+/-- Executes a typed insert and returns the driver's integer key for the inserted row. -/
 def insertOn {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode}
-    (conn : δ) (q : InsertQuery tbl) : IO Int := do
-  Driver.exec conn q.render
-  Driver.lastInsertRowId conn
+    (conn : δ) (q : InsertQuery tbl) : IO Int :=
+  let key := tbl.schema.cols.find? fun col => col.isPrimaryKey && col.ty == .int
+  Driver.insertRow conn q.render (key.map ColDef.name)
 
 /-- Executes a scope-checked `UPDATE` on a borrowed connection. -/
 def updateOn {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode} {isScoped : Bool}
@@ -130,7 +130,7 @@ def select {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode} {isSco
     IO (Array (Array SqlValue)) :=
   pool.withConn fun conn => selectOn conn q hscope
 
-/-- Executes an `INSERT` query using a pooled connection and returns `lastInsertRowId`. -/
+/-- Executes a typed insert using a pooled connection and returns the driver's integer key. -/
 def insert {δ : Type} [Driver δ] {mode : TenantMode} {tbl : Table mode}
     (pool : Pool δ) (q : InsertQuery tbl) : IO Int :=
   pool.withConn fun conn => insertOn conn q
