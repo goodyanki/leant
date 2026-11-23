@@ -85,14 +85,14 @@ def corsWith (cfg : CorsConfig := {}) : Middleware := fun next c => do
 def cors (allowOrigin : String := "*") : Middleware :=
   corsWith { allowOrigin }
 
-/-- Rejects requests whose body exceeds `maxBytes` with `413 Payload Too Large` (PRD K8). -/
+/-- Rejects requests whose body exceeds `maxBytes` with `413 Payload Too Large`. -/
 def bodyLimit (maxBytes : Nat) : Middleware := fun next c => do
   if c.request.body.size > maxBytes then
     throw (.payloadTooLarge s!"request body exceeds limit of {maxBytes} bytes")
   else
     next c
 
-/-- Enforces a wall-clock timeout in milliseconds on downstream handler execution (PRD K8).
+/-- Enforces a wall-clock timeout in milliseconds on downstream handler execution.
     Returns `408 Request Timeout` if the handler does not complete within `timeoutMs`. -/
 def timeout (timeoutMs : UInt32) : Middleware := fun next c =>
   ExceptT.mk do

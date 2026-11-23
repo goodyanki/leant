@@ -1,25 +1,24 @@
-# ADR-001: 采用 Rust (`tokio` + `hyper`) 作为默认 HTTP Transport 层
+# ADR-001: Adopt Rust (`tokio` + `hyper`) as the Default HTTP Transport
 
-- **状态**：已采纳
-- **日期**：2026-11-22
-- **关联**：`docs/DEVELOPMENT_PLAN.md` 决策点 D0、`bench/results/M0.md`
+- **Status**: Accepted
+- **Date**: 2026-11-22
 
-## 背景
+## Context
 
-`DEVELOPMENT_PLAN.md` 的决策点 D0 约定：若 Lean 4 标准库 `Std.Http` 吞吐低于同机 Gin 的 10%，或在高并发下不稳定，则将 HTTP 传输层替换为 Rust (`hyper`) 或 C shim，Lean 仅负责路由、中间件、业务逻辑与形式化验证核心。
+Leant requires high concurrent HTTP/1.1 throughput and predictable tail latency while keeping routing, middleware, binding, data access, and authorization logic in Lean 4 so core invariants can be machine-checked.
 
-## 实测依据
+## Benchmark Evidence
 
-在 Lean `v4.36.0` 上实测（详见 `bench/results/M0.md`）：
-- 裸 `Std.Http` 峰值约 **3.2k RPS**，仅为同机 Gin（48k RPS）的 **6.1%–8.5%**；
-- 在 `c=512` 下出现 **181–221 次 2s 超时**，p99 达到 **1.33s**；
-- 同机验证的 **Rust (`tokio` + `hyper` 1.x) + C ABI shim + Lean 4 FFI** 达到 **94.8k–101.7k RPS**（Gin 的 **2x–2.7x**），`c=512` 下 p99 仅 **13.71ms**，0 错误，RSS 稳定在 14 MB。
+Benchmarked on Linux x86_64 (2 vCPU, Lean `v4.36.0`, Go Gin `v1.12.0` release mode; full results in [transport-comparison.md](../../bench/results/transport-comparison.md)):
 
-## 决策
+- Pure `Std.Http.Server` peaked at ~3.2k RPS (6.1%–8.5% of Gin) and experienced 181–221 timeouts with 1.33s p99 latency at 512 concurrent connections.
+- A Rust (`tokio` + `hyper` 1.x) HTTP/1.1 transport calling Lean 4 via a thin C ABI shim achieved 94.8k–101.7k RPS (~2x–2.7x Gin) with 13.7ms p99 latency, 0 errors, and flat ~14 MB RSS.
 
-1. 保留 `Leant.Transport.Backend` 抽象层，便于未来切换或回测新版本 `Std.Http`。
-2. 默认传输层实现为 `Leant.Transport.RustHyper`：
-   - Rust (`transport/rust-http`) 编译为 `staticlib`，通过 Lake `extern_lib` 集成到单二进制产物。
-   - 薄 C shim (`transport/c/bridge.c`) 使用 `<lean/lean.h>` 隔离 Lean 内部对象内存布局。
-   - 启动服务前通过 `lean_mark_mt` 标记路由/中间件闭包图；每个 Tokio worker 线程通过 `lean_initialize_thread` / `lean_finalize_thread` 接入 Lean runtime。
-3. **TCB 影响**：Rust HTTP 传输层与 C shim 属于网络传输可信基（替代原 `Std.Http` + `libuv` 在 TCB 中的位置），路由、授权策略、ORM 查询 AST 等核心形式化验证范围不受影响。
+## Decision
+
+1. Keep `Leant.Transport.Backend` as a pluggable transport interface so alternative transports (including future `Std.Http` versions) can be swapped in cleanly.
+2. Ship `Leant.Transport.RustHyper` as the default backend:
+   - Rust (`transport/rust-http`) builds as a `staticlib` orchestrated automatically by Lake into a single native binary.
+   - A thin C shim (`transport/c/bridge.c`) isolates Lean internal object layouts via `<lean/lean.h>`.
+   - Before spawning Tokio worker threads, the handler/router closure graph is marked thread-shared (`lean_mark_mt`); each worker registers with `lean_initialize_thread` / `lean_finalize_thread`.
+3. **Trusted Computing Base (TCB)**: The Rust HTTP transport and C shim sit inside the network I/O TCB (replacing `Std.Http` + `libuv`), leaving all formal verification guarantees for routing, ORM queries, and authorization intact.

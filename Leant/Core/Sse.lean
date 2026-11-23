@@ -38,7 +38,7 @@ end SseEvent
 
 namespace Response
 
-/-- Builds a Server-Sent Events (`text/event-stream`) response from an array of `SseEvent`s (PRD K7). -/
+/-- Builds a Server-Sent Events (`text/event-stream`) response from an array of `SseEvent`s. -/
 def sse (events : Array SseEvent) (status : Status := Status.ok) : Response :=
   { status
   , headers := Headers.empty
@@ -47,7 +47,7 @@ def sse (events : Array SseEvent) (status : Status := Status.ok) : Response :=
       |>.set "Connection" "keep-alive"
   , body := (SseEvent.encodeAll events).toUTF8 }
 
-/-- Builds a chunked/streamed response by concatenating an array of byte chunks (PRD K7). -/
+/-- Builds a chunked/streamed response by concatenating an array of byte chunks. -/
 def streamChunks
     (chunks : Array ByteArray)
     (contentType : String := "application/octet-stream")

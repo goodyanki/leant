@@ -94,7 +94,7 @@ theorem param_precedes_wildcard_second (seg pname wname : String) (m : Method) (
   simp [TrieNode.empty, TrieNode.insert, upsertMethodHandler,
         TrieNode.lookupMethod, TrieNode.findStatic, findMethodHandler]
 
-/-! ### Roundtrip Theorem: `lookup (render r ps) = some (h, ps)` (PRD M2.1) -/
+/-! ### Roundtrip Theorem: `lookup (render r ps) = some (h, ps)` -/
 
 /-- Well-formedness predicate for static/param route patterns (no wildcard segment). -/
 def NoWildcard : List Segment → Prop
@@ -126,7 +126,7 @@ def expectedParams : List Segment → List String → Array (String × String) �
   | .param name :: rest, [], acc => expectedParams rest [] (acc.push (name, ""))
   | .wildcard _ :: _, _, acc => acc
 
-/-- Theorem 4 (Roundtrip Invertibility, PRD M2.1):
+/-- Theorem 4 (Roundtrip Invertibility):
     For any route `segs` without wildcards and matching parameter list `vals`,
     inserting `(segs, m, h)` into an empty trie and looking up `renderSegments segs vals`
     ALWAYS recovers `(h, expectedParams segs vals acc)`. -/

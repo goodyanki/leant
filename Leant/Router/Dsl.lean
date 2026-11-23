@@ -18,7 +18,7 @@ def RenderFn : List Type → Type
   | []      => String
   | α :: ts => α → RenderFn ts
 
-/-- Compile-time typed route specification (PRD K12).
+/-- Compile-time typed route specification.
     Guarantees at compile time that handler parameter types match the route's path parameters. -/
 inductive TypedPath : List Type → Type 1 where
   | nil : TypedPath []
@@ -60,7 +60,7 @@ def toHandler {ts : List Type} (p : TypedPath ts) (h : TypedHandler ts) : Handle
 
 end TypedPath
 
-/-! ### Declarative `route!` Macro DSL (PRD K12) -/
+/-! ### Declarative `route!` Macro DSL -/
 
 declare_syntax_cat leant_route_seg
 syntax str : leant_route_seg

@@ -11,6 +11,10 @@
 # Benchmarks
 /bench/baselines/gin/gin_baseline
 
+# Local planning docs (kept local, never synced)
+/docs/PRD.md
+/docs/DEVELOPMENT_PLAN.md
+
 # OS / Editor
 .DS_Store
 *.swp

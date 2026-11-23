@@ -2,7 +2,7 @@ import Leant.Core.Types
 
 namespace Leant.Transport
 
-/-- Server transport configuration: address, concurrency cap, body cap, and timeouts (PRD K1 / M2.3). -/
+/-- Server transport configuration: address, concurrency cap, body cap, and timeouts. -/
 structure Config where
   host : String := "127.0.0.1"
   port : UInt16 := 8080

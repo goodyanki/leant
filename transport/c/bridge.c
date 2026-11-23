@@ -39,7 +39,7 @@ typedef struct {
     void *lean_obj;
 } LeanRawResponse;
 
-/* Persistent zero-alloc singletons for common hot-path request inputs (M2.8). */
+/* Persistent zero-alloc singletons for common hot-path request inputs. */
 static lean_object *g_empty_str = NULL;
 static lean_object *g_empty_bytes = NULL;
 static lean_object *g_method_get = NULL;

@@ -128,7 +128,7 @@ async fn handle_req_inner(
     max_body_bytes: usize,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    // Hot path (M2.8): if request has no body (e.g. GET /plaintext, GET /json),
+    // Hot path: if request has no body (e.g. GET /plaintext, GET /json),
     // skip body collection and method/path/query heap copies completely.
     if req.body().is_end_stream() {
         let method = req.method().as_str().as_bytes();
@@ -233,7 +233,7 @@ async fn wait_for_shutdown_signal() {
 }
 
 /// Starts the Tokio + Hyper HTTP/1.1 server with header/request timeouts,
-/// connection cap, and graceful drain on SIGINT/SIGTERM (M2.3).
+/// connection cap, and graceful drain on SIGINT/SIGTERM.
 #[no_mangle]
 pub extern "C" fn leant_rust_serve(
     host_ptr: *const c_char,

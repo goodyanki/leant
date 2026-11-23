@@ -3,7 +3,7 @@ import Leant.App
 
 namespace Leant.Testing
 
-/-- Executes a `Request` directly against an `App` in memory without opening a socket (PRD K11). -/
+/-- Executes a `Request` directly against an `App` in memory without opening a socket. -/
 def run (app : App) (req : Request) : IO Response :=
   app.handle req
 

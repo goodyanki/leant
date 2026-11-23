@@ -18,7 +18,7 @@ instance : ToString SameSite := ⟨SameSite.toString⟩
 
 end SameSite
 
-/-- HTTP `Set-Cookie` builder with secure defaults (`HttpOnly`, `Secure`, `SameSite=Lax`, PRD S1). -/
+/-- HTTP `Set-Cookie` builder with secure defaults (`HttpOnly`, `Secure`, `SameSite=Lax`). -/
 structure Cookie where
   name : String
   value : String

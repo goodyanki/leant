@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 GIN_DIR="$ROOT_DIR/bench/baselines/gin"
 RESULTS_DIR="$ROOT_DIR/bench/results"
-CSV_OUT="${1:-$RESULTS_DIR/M2.csv}"
+CSV_OUT="${1:-$RESULTS_DIR/http-benchmarks.csv}"
 DURATION="${DURATION:-5s}"
 CONNS="${CONNS:-16 64 256 512}"
 

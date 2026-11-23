@@ -31,7 +31,7 @@ inductive Decision where
   | deny
   deriving Repr, BEq, DecidableEq, Inhabited
 
-/-- Policy v1: RBAC + resource ownership + explicit forbid rules + hard tenant isolation (PRD Appendix A). -/
+/-- Policy v1: RBAC + resource ownership + explicit forbid rules + hard tenant isolation. -/
 structure Policy where
   roleRules : List (String × Action × String) := []
   ownerActions : List Action := []
@@ -52,7 +52,7 @@ def rolePermits (pol : Policy) (p : Principal) (a : Action) (r : Resource) : Boo
 
 end Policy
 
-/-- Pure policy evaluation semantics (PRD Appendix A). -/
+/-- Pure policy evaluation semantics. -/
 def evaluate (pol : Policy) (p : Principal) (a : Action) (r : Resource) : Decision :=
   if r.tenant != p.tenant then .deny
   else if pol.forbids p a r then .deny
@@ -60,7 +60,7 @@ def evaluate (pol : Policy) (p : Principal) (a : Action) (r : Resource) : Decisi
   else if pol.ownerActions.contains a && r.owner == p.id then .allow
   else .deny
 
-/-- Proof-carrying authorization token required by guarded handlers (PRD A4). -/
+/-- Proof-carrying authorization token required by guarded handlers. -/
 structure Authorized (pol : Policy) (p : Principal) (a : Action) (r : Resource) : Type where
   proof : evaluate pol p a r = .allow
 
@@ -71,7 +71,7 @@ def guard (pol : Policy) (p : Principal) (a : Action) (r : Resource)
   | .allow => .ok ⟨h⟩
   | .deny  => .error (.forbidden "Access denied by policy")
 
-/-! ### Core Security Theorems (PRD A6, fully proved) -/
+/-! ### Core Security Theorems -/
 
 /-- Theorem 1 (Tenant Isolation): Cross-tenant access is always denied regardless of policy or roles. -/
 theorem tenant_isolation (pol : Policy) (p : Principal) (a : Action) (r : Resource)
