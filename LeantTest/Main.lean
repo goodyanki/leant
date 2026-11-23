@@ -487,6 +487,107 @@ private def testSecurityAndAuthzIntegration : IO Unit := do
   assertEq "rateLimit #2 -> 200" rRl2.status Status.ok
   assertEq "rateLimit #3 -> 429" rRl3.status Status.tooManyRequests
 
+section MacroTests
+open Leant.Data
+
+leant_table AuthorsTable "authors" where
+  | id   : SqlType.int  [pk, auto]
+  | name : SqlType.text [unique]
+
+leant_tenant_table ArticlesTable "articles" (tenant_id : ScalarType.text) where
+  | id        : SqlType.int  [pk, auto]
+  | tenant_id : SqlType.text
+  | author_id : SqlType.int
+  | title     : SqlType.text
+
+end MacroTests
+
+open Leant.Data Leant.Data.Migration Leant.Security Leant.Static in
+private def testV05Features : IO Unit := do
+  -- 1. Declarative table macros + multi-table SQL JOIN on SQLite
+  let pool ← Pool.createSqlite ":memory:"
+  pool.migrateTable AuthorsTable.table
+  pool.migrateTable ArticlesTable.table
+
+  let authorId ← pool.insert <| InsertQuery.into AuthorsTable.table
+    |>.set AuthorsTable.name "Ada Lovelace"
+  let _ ← pool.insert <| InsertQuery.into ArticlesTable.table
+    |>.set ArticlesTable.tenant_id "t-1"
+    |>.set ArticlesTable.author_id authorId
+    |>.set ArticlesTable.title "Verified Web Frameworks"
+
+  let joinQ := JoinQuery.inner ArticlesTable.table AuthorsTable.table
+      ArticlesTable.author_id AuthorsTable.id
+    |>.filter (.eq (.left ArticlesTable.tenant_id) "t-1")
+    |>.limit 5
+  let joinRows ← pool.withConn fun conn => Driver.query conn joinQ.render
+  assertEq "JOIN query row count" joinRows.size 1
+  -- Projected columns: articles(id, tenant_id, author_id, title), authors(id, name) -> idx 3 = title, idx 5 = author name
+  assertTrue "JOIN projected article title"
+    ((joinRows[0]?.bind (·[3]?)) == some (.text "Verified Web Frameworks"))
+  assertTrue "JOIN projected author name"
+    ((joinRows[0]?.bind (·[5]?)) == some (.text "Ada Lovelace"))
+
+  -- 2. Schema diff & versioned migrations (migrateUp + rollbackLast)
+  let sV1 : Schema := {
+    tableName := ⟨"widgets", by decide⟩
+    cols := [{ name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true }]
+  }
+  let sV2 : Schema := {
+    tableName := ⟨"widgets", by decide⟩
+    cols := [
+      { name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true },
+      { name := ⟨"label", by decide⟩, ty := .nullableText }
+    ]
+  }
+  let ops := diffSchema sV1 sV2
+  assertEq "diffSchema detects 1 added column" ops.length 1
+
+  let migrations : List Migration := [
+    { version := 1, name := "create_widgets"
+    , up := [.createTable sV1], down := [.dropTable sV1.tableName] },
+    { version := 2, name := "add_label"
+    , up := ops, down := [] }
+  ]
+  let applied1 ← migrateUp pool migrations
+  assertEq "migrateUp applied [1, 2]" applied1 #[1, 2]
+  let applied2 ← migrateUp pool migrations
+  assertEq "migrateUp idempotent []" applied2 #[]
+  let rolled ← rollbackLast pool migrations
+  assertEq "rollbackLast version 2" rolled (some 2)
+  let vers ← appliedVersions pool
+  assertEq "appliedVersions after rollback" vers #[1]
+
+  -- 3. PostgreSQL placeholder translation
+  assertEq "toPostgresPlaceholders"
+    (toPostgresPlaceholders "SELECT id FROM users WHERE tenant_id = ? AND id = ? LIMIT ?")
+    "SELECT id FROM users WHERE tenant_id = $1 AND id = $2 LIMIT $3"
+
+  -- 4. Argon2id password hashing & constant-time verification
+  let phc ← Password.hash "correct-horse-battery-staple"
+  assertTrue "Argon2id PHC prefix" (phc.startsWith "$argon2id$")
+  assertTrue "Argon2id verify valid" (Password.verify "correct-horse-battery-staple" phc)
+  assertTrue "Argon2id verify wrong password" (!Password.verify "wrong-password" phc)
+  assertTrue "Argon2id verify malformed hash" (!Password.verify "anything" "not-a-hash")
+
+  -- 5. Static file serving + traversal rejection
+  assertEq "static rejects .." (safeRelativePath "../etc/passwd") none
+  assertEq "static rejects nested .." (safeRelativePath "css/../../secret") none
+  assertEq "static rejects backslash" (safeRelativePath "a\\b") none
+  assertEq "static accepts valid path" (safeRelativePath "css/app.css") (some ["css", "app.css"])
+
+  let tmpDir : System.FilePath := "/tmp/leant_static_test"
+  IO.FS.createDirAll (tmpDir / "css")
+  IO.FS.writeFile (tmpDir / "css" / "app.css") "body { color: black; }"
+  let staticApp := Leant.new |>.static "/assets" tmpDir
+  let rFile ← Testing.get staticApp "/assets/css/app.css"
+  assertEq "static serves file 200" rFile.status Status.ok
+  assertEq "static Content-Type CSS" (rFile.headers.get? "content-type") (some "text/css; charset=utf-8")
+  assertEq "static X-Content-Type-Options" (rFile.headers.get? "x-content-type-options") (some "nosniff")
+  assertEq "static body" rFile.bodyText "body { color: black; }"
+  let rEsc ← Testing.get staticApp "/assets/../etc/passwd"
+  assertEq "static traversal blocked 404" rEsc.status Status.notFound
+
 def main : IO Unit := do
   testTrieRouting
   testCookiesQueryForm
@@ -497,4 +598,5 @@ def main : IO Unit := do
   testSseAndStream
   testVerifiedOrmAndSqlite
   testSecurityAndAuthzIntegration
+  testV05Features
   IO.println "All Leant tests passed!"

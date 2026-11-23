@@ -439,3 +439,364 @@ pub extern "C" fn leant_rust_random_bytes(out_ptr: *mut u8, len: usize) -> i32 {
     }
 }
 
+/* ---------- Argon2id Password Hashing ---------- */
+
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
+
+/// Hashes `password` with Argon2id + OS CSPRNG salt into a PHC string (`$argon2id$...`).
+/// Writes NUL-terminated UTF-8 into `out_buf` (up to `out_cap` bytes) and sets `*out_len`.
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn leant_rust_argon2_hash(
+    pwd_ptr: *const u8,
+    pwd_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_len.is_null() || out_cap < 128 {
+        return -1;
+    }
+    let pwd = if pwd_len == 0 || pwd_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(pwd_ptr, pwd_len) }
+    };
+
+    let mut raw_salt = [0u8; 16];
+    if getrandom::getrandom(&mut raw_salt).is_err() {
+        return -1;
+    }
+    let salt = match SaltString::encode_b64(&raw_salt) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let argon2 = Argon2::default();
+    let phc = match argon2.hash_password(pwd, &salt) {
+        Ok(h) => h.to_string(),
+        Err(_) => return -1,
+    };
+
+    let bytes = phc.as_bytes();
+    if bytes.len() >= out_cap {
+        return -1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        *out_buf.add(bytes.len()) = 0;
+        *out_len = bytes.len();
+    }
+    0
+}
+
+/// Verifies `password` against a PHC-formatted Argon2 hash string in constant time.
+/// Returns 1 if valid, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn leant_rust_argon2_verify(
+    pwd_ptr: *const u8,
+    pwd_len: usize,
+    hash_ptr: *const u8,
+    hash_len: usize,
+) -> u8 {
+    if hash_ptr.is_null() || hash_len == 0 {
+        return 0;
+    }
+    let pwd = if pwd_len == 0 || pwd_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(pwd_ptr, pwd_len) }
+    };
+    let hash_bytes = unsafe { slice::from_raw_parts(hash_ptr, hash_len) };
+    let hash_str = match std::str::from_utf8(hash_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let parsed = match PasswordHash::new(hash_str) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    if Argon2::default().verify_password(pwd, &parsed).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+/* ---------- Pure-Rust PostgreSQL Wire-Protocol Client ---------- */
+
+use postgres::types::ToSql;
+use postgres::{Client, NoTls};
+
+#[repr(C)]
+pub struct PgParamC {
+    /// 0 = null, 1 = int64, 2 = text, 3 = bool, 4 = blob
+    pub tag: u8,
+    pub bool_val: u8,
+    pub int_val: i64,
+    pub bytes_ptr: *const u8,
+    pub bytes_len: usize,
+}
+
+#[repr(C)]
+pub struct PgCellC {
+    pub tag: u8,
+    pub bool_val: u8,
+    pub int_val: i64,
+    pub bytes_ptr: *mut u8,
+    pub bytes_len: usize,
+}
+
+#[repr(C)]
+pub struct PgResultSetC {
+    pub num_rows: usize,
+    pub num_cols: usize,
+    pub cells: *mut PgCellC,
+}
+
+enum OwnedPgParam {
+    Null,
+    Int(i64),
+    Text(String),
+    Bool(bool),
+    Blob(Vec<u8>),
+}
+
+impl OwnedPgParam {
+    fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            OwnedPgParam::Null => &None::<String>,
+            OwnedPgParam::Int(v) => v,
+            OwnedPgParam::Text(s) => s,
+            OwnedPgParam::Bool(b) => b,
+            OwnedPgParam::Blob(b) => b,
+        }
+    }
+}
+
+fn copy_err(msg: &str, err_buf: *mut u8, err_cap: usize) {
+    if err_buf.is_null() || err_cap == 0 {
+        return;
+    }
+    let bytes = msg.as_bytes();
+    let n = bytes.len().min(err_cap - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), err_buf, n);
+        *err_buf.add(n) = 0;
+    }
+}
+
+fn decode_c_params(params_ptr: *const PgParamC, params_len: usize) -> Vec<OwnedPgParam> {
+    if params_ptr.is_null() || params_len == 0 {
+        return Vec::new();
+    }
+    let slice_params = unsafe { slice::from_raw_parts(params_ptr, params_len) };
+    let mut out = Vec::with_capacity(params_len);
+    for p in slice_params {
+        match p.tag {
+            1 => out.push(OwnedPgParam::Int(p.int_val)),
+            2 => {
+                let s = if p.bytes_ptr.is_null() || p.bytes_len == 0 {
+                    String::new()
+                } else {
+                    let b = unsafe { slice::from_raw_parts(p.bytes_ptr, p.bytes_len) };
+                    String::from_utf8_lossy(b).into_owned()
+                };
+                out.push(OwnedPgParam::Text(s));
+            }
+            3 => out.push(OwnedPgParam::Bool(p.bool_val != 0)),
+            4 => {
+                let v = if p.bytes_ptr.is_null() || p.bytes_len == 0 {
+                    Vec::new()
+                } else {
+                    unsafe { slice::from_raw_parts(p.bytes_ptr, p.bytes_len).to_vec() }
+                };
+                out.push(OwnedPgParam::Blob(v));
+            }
+            _ => out.push(OwnedPgParam::Null),
+        }
+    }
+    out
+}
+
+#[no_mangle]
+pub extern "C" fn leant_rust_pg_connect(
+    conn_str_ptr: *const c_char,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> *mut c_void {
+    if conn_str_ptr.is_null() {
+        copy_err("null connection string", err_buf, err_cap);
+        return std::ptr::null_mut();
+    }
+    let conn_str = match unsafe { std::ffi::CStr::from_ptr(conn_str_ptr).to_str() } {
+        Ok(s) => s,
+        Err(_) => {
+            copy_err("invalid UTF-8 connection string", err_buf, err_cap);
+            return std::ptr::null_mut();
+        }
+    };
+    match Client::connect(conn_str, NoTls) {
+        Ok(client) => Box::into_raw(Box::new(client)) as *mut c_void,
+        Err(e) => {
+            copy_err(&e.to_string(), err_buf, err_cap);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn leant_rust_pg_close(client_ptr: *mut c_void) {
+    if !client_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(client_ptr as *mut Client);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn leant_rust_pg_exec(
+    client_ptr: *mut c_void,
+    sql_ptr: *const c_char,
+    params_ptr: *const PgParamC,
+    params_len: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> i32 {
+    if client_ptr.is_null() || sql_ptr.is_null() {
+        copy_err("null pg client or sql", err_buf, err_cap);
+        return -1;
+    }
+    let client = unsafe { &mut *(client_ptr as *mut Client) };
+    let sql = match unsafe { std::ffi::CStr::from_ptr(sql_ptr).to_str() } {
+        Ok(s) => s,
+        Err(_) => {
+            copy_err("invalid UTF-8 sql", err_buf, err_cap);
+            return -1;
+        }
+    };
+    let owned = decode_c_params(params_ptr, params_len);
+    let refs: Vec<&(dyn ToSql + Sync)> = owned.iter().map(|p| p.as_to_sql()).collect();
+    match client.execute(sql, &refs) {
+        Ok(_) => 0,
+        Err(e) => {
+            copy_err(&e.to_string(), err_buf, err_cap);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn leant_rust_pg_query(
+    client_ptr: *mut c_void,
+    sql_ptr: *const c_char,
+    params_ptr: *const PgParamC,
+    params_len: usize,
+    out_rs: *mut PgResultSetC,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> i32 {
+    if client_ptr.is_null() || sql_ptr.is_null() || out_rs.is_null() {
+        copy_err("null pg query argument", err_buf, err_cap);
+        return -1;
+    }
+    let client = unsafe { &mut *(client_ptr as *mut Client) };
+    let sql = match unsafe { std::ffi::CStr::from_ptr(sql_ptr).to_str() } {
+        Ok(s) => s,
+        Err(_) => {
+            copy_err("invalid UTF-8 sql", err_buf, err_cap);
+            return -1;
+        }
+    };
+    let owned = decode_c_params(params_ptr, params_len);
+    let refs: Vec<&(dyn ToSql + Sync)> = owned.iter().map(|p| p.as_to_sql()).collect();
+    let rows = match client.query(sql, &refs) {
+        Ok(r) => r,
+        Err(e) => {
+            copy_err(&e.to_string(), err_buf, err_cap);
+            return -1;
+        }
+    };
+
+    let num_rows = rows.len();
+    let num_cols = if num_rows > 0 { rows[0].len() } else { 0 };
+    let mut cells: Vec<PgCellC> = Vec::with_capacity(num_rows * num_cols);
+
+    for row in &rows {
+        for i in 0..num_cols {
+            let col_type = row.columns()[i].type_().name();
+            let cell = match col_type {
+                "int2" => match row.try_get::<_, Option<i16>>(i) {
+                    Ok(Some(v)) => PgCellC { tag: 1, bool_val: 0, int_val: v as i64, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+                "int4" => match row.try_get::<_, Option<i32>>(i) {
+                    Ok(Some(v)) => PgCellC { tag: 1, bool_val: 0, int_val: v as i64, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+                "int8" => match row.try_get::<_, Option<i64>>(i) {
+                    Ok(Some(v)) => PgCellC { tag: 1, bool_val: 0, int_val: v, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+                "bool" => match row.try_get::<_, Option<bool>>(i) {
+                    Ok(Some(b)) => PgCellC { tag: 3, bool_val: if b { 1 } else { 0 }, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+                "bytea" => match row.try_get::<_, Option<Vec<u8>>>(i) {
+                    Ok(Some(mut v)) => {
+                        let len = v.len();
+                        let ptr = v.as_mut_ptr();
+                        std::mem::forget(v);
+                        PgCellC { tag: 4, bool_val: 0, int_val: 0, bytes_ptr: ptr, bytes_len: len }
+                    }
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+                _ => match row.try_get::<_, Option<String>>(i) {
+                    Ok(Some(s)) => {
+                        let mut v = s.into_bytes();
+                        let len = v.len();
+                        let ptr = v.as_mut_ptr();
+                        std::mem::forget(v);
+                        PgCellC { tag: 2, bool_val: 0, int_val: 0, bytes_ptr: ptr, bytes_len: len }
+                    }
+                    _ => PgCellC { tag: 0, bool_val: 0, int_val: 0, bytes_ptr: std::ptr::null_mut(), bytes_len: 0 },
+                },
+            };
+            cells.push(cell);
+        }
+    }
+
+    let boxed = cells.into_boxed_slice();
+    let ptr = Box::into_raw(boxed) as *mut PgCellC;
+    unsafe {
+        (*out_rs).num_rows = num_rows;
+        (*out_rs).num_cols = num_cols;
+        (*out_rs).cells = ptr;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn leant_rust_pg_free_result(rs: *mut PgResultSetC) {
+    if rs.is_null() {
+        return;
+    }
+    unsafe {
+        let total = (*rs).num_rows * (*rs).num_cols;
+        if !(*rs).cells.is_null() && total > 0 {
+            let slice_cells = slice::from_raw_parts_mut((*rs).cells, total);
+            for cell in slice_cells.iter() {
+                if !cell.bytes_ptr.is_null() && (cell.tag == 2 || cell.tag == 4) {
+                    let _ = Vec::from_raw_parts(cell.bytes_ptr, cell.bytes_len, cell.bytes_len);
+                }
+            }
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut((*rs).cells, total));
+        }
+        (*rs).cells = std::ptr::null_mut();
+        (*rs).num_rows = 0;
+        (*rs).num_cols = 0;
+    }
+}
+
+

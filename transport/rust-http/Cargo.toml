@@ -1,6 +1,6 @@
 [package]
 name = "leant_rust_http"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 
 [lib]
@@ -17,3 +17,5 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 getrandom = "0.2"
+argon2 = "0.5"
+postgres = "0.19"

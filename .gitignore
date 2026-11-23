@@ -8,8 +8,8 @@
 # Rust
 /transport/rust-http/target/
 
-# Benchmarks
-/bench/baselines/gin/gin_baseline
+# Benchmarks (external baselines are kept out of VCS)
+/bench/baselines/
 
 # Local planning docs (kept local, never synced)
 /docs/PRD.md

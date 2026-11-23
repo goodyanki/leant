@@ -9,7 +9,7 @@ Leant requires high concurrent HTTP/1.1 throughput and predictable tail latency 
 
 ## Benchmark Evidence
 
-Benchmarked on Linux x86_64 (2 vCPU, Lean `v4.36.0`, Go Gin `v1.12.0` release mode; full results in [transport-comparison.md](../../bench/results/transport-comparison.md)):
+Benchmarked on Linux x86_64 (2 vCPU, Lean `v4.36.0`, Go Gin `v1.12.0` release mode; full results in [transport-comparison.md](../benchmarks/transport-comparison.md)):
 
 - Pure `Std.Http.Server` peaked at ~3.2k RPS (6.1%–8.5% of Gin) and experienced 181–221 timeouts with 1.33s p99 latency at 512 concurrent connections.
 - A Rust (`tokio` + `hyper` 1.x) HTTP/1.1 transport calling Lean 4 via a thin C ABI shim achieved 94.8k–101.7k RPS (~2x–2.7x Gin) with 13.7ms p99 latency, 0 errors, and flat ~14 MB RSS.

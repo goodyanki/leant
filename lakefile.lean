@@ -2,7 +2,7 @@ import Lake
 open Lake DSL
 
 package leant where
-  version := v!"0.1.0"
+  version := v!"0.5.0"
 
 /-- Compiles the thin C ABI bridge (`transport/c/bridge.c`) against `<lean/lean.h>`. -/
 target bridge.o pkg : System.FilePath := do

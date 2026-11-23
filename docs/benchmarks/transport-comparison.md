@@ -22,4 +22,4 @@
 
 ## Conclusion
 
-Leant adopts the Rust (`tokio` + `hyper`) transport behind the pluggable `Leant.Transport.Backend` interface (see [ADR-001](../../docs/adr/001-rust-hyper-transport.md)).
+Leant adopts the Rust (`tokio` + `hyper`) transport behind the pluggable `Leant.Transport.Backend` interface (see [ADR-001](../adr/001-rust-hyper-transport.md)).

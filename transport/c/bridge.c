@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 
 extern void lean_initialize_thread(void);
 extern void lean_finalize_thread(void);
@@ -230,4 +231,215 @@ LEAN_EXPORT lean_obj_res leant_c_random_bytes(size_t len, lean_obj_arg world) {
     }
     return lean_io_result_mk_ok(out);
 }
+
+/* ---------- Argon2id FFI Wrappers ---------- */
+
+extern int32_t leant_rust_argon2_hash(
+    const uint8_t *pwd_ptr, size_t pwd_len,
+    uint8_t *out_buf, size_t out_cap, size_t *out_len
+);
+extern uint8_t leant_rust_argon2_verify(
+    const uint8_t *pwd_ptr, size_t pwd_len,
+    const uint8_t *hash_ptr, size_t hash_len
+);
+
+LEAN_EXPORT lean_obj_res leant_c_argon2_hash(b_lean_obj_arg pwd_obj, lean_obj_arg world) {
+    (void)world;
+    char buf[256];
+    size_t out_len = 0;
+    int32_t rc = leant_rust_argon2_hash(
+        (const uint8_t *)lean_string_cstr(pwd_obj),
+        lean_string_size(pwd_obj) - 1,
+        (uint8_t *)buf,
+        sizeof(buf),
+        &out_len
+    );
+    if (rc != 0) {
+        return lean_io_result_mk_error(
+            lean_mk_io_user_error(lean_mk_string("argon2 password hashing failed"))
+        );
+    }
+    return lean_io_result_mk_ok(lean_mk_string_from_bytes(buf, out_len));
+}
+
+LEAN_EXPORT uint8_t leant_c_argon2_verify(b_lean_obj_arg pwd_obj, b_lean_obj_arg hash_obj) {
+    return leant_rust_argon2_verify(
+        (const uint8_t *)lean_string_cstr(pwd_obj),
+        lean_string_size(pwd_obj) - 1,
+        (const uint8_t *)lean_string_cstr(hash_obj),
+        lean_string_size(hash_obj) - 1
+    );
+}
+
+/* ---------- PostgreSQL FFI Wrappers ---------- */
+
+typedef struct {
+    uint8_t tag;
+    uint8_t bool_val;
+    int64_t int_val;
+    const uint8_t *bytes_ptr;
+    size_t bytes_len;
+} PgParamC;
+
+typedef struct {
+    uint8_t tag;
+    uint8_t bool_val;
+    int64_t int_val;
+    uint8_t *bytes_ptr;
+    size_t bytes_len;
+} PgCellC;
+
+typedef struct {
+    size_t num_rows;
+    size_t num_cols;
+    PgCellC *cells;
+} PgResultSetC;
+
+extern void *leant_rust_pg_connect(const char *conn_str, uint8_t *err_buf, size_t err_cap);
+extern void leant_rust_pg_close(void *client_ptr);
+extern int32_t leant_rust_pg_exec(
+    void *client_ptr, const char *sql,
+    const PgParamC *params_ptr, size_t params_len,
+    uint8_t *err_buf, size_t err_cap
+);
+extern int32_t leant_rust_pg_query(
+    void *client_ptr, const char *sql,
+    const PgParamC *params_ptr, size_t params_len,
+    PgResultSetC *out_rs,
+    uint8_t *err_buf, size_t err_cap
+);
+extern void leant_rust_pg_free_result(PgResultSetC *rs);
+
+static lean_external_class *g_pg_conn_class = NULL;
+
+static void pg_conn_finalizer(void *ptr) {
+    leant_rust_pg_close(ptr);
+}
+
+static void pg_conn_foreach(void *ptr, b_lean_obj_arg f) {
+    (void)ptr;
+    (void)f;
+}
+
+static lean_external_class *get_pg_conn_class(void) {
+    if (g_pg_conn_class == NULL) {
+        g_pg_conn_class = lean_register_external_class(pg_conn_finalizer, pg_conn_foreach);
+    }
+    return g_pg_conn_class;
+}
+
+static PgParamC *marshal_pg_params(b_lean_obj_arg params_obj, size_t *out_len) {
+    size_t n = lean_array_size(params_obj);
+    *out_len = n;
+    if (n == 0) return NULL;
+    PgParamC *arr = (PgParamC *)calloc(n, sizeof(PgParamC));
+    if (arr == NULL) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        lean_object *v = lean_array_get_core(params_obj, i);
+        if (lean_is_scalar(v)) {
+            arr[i].tag = 0;
+        } else {
+            unsigned tag = lean_obj_tag(v);
+            arr[i].tag = (uint8_t)tag;
+            if (tag == 1) {
+                arr[i].int_val = (int64_t)lean_int64_of_int(lean_ctor_get(v, 0));
+            } else if (tag == 2) {
+                lean_object *s = lean_ctor_get(v, 0);
+                arr[i].bytes_ptr = (const uint8_t *)lean_string_cstr(s);
+                arr[i].bytes_len = lean_string_size(s) - 1;
+            } else if (tag == 3) {
+                arr[i].bool_val = lean_ctor_get_uint8(v, 0);
+            } else if (tag == 4) {
+                lean_object *ba = lean_ctor_get(v, 0);
+                arr[i].bytes_ptr = lean_sarray_cptr(ba);
+                arr[i].bytes_len = lean_sarray_size(ba);
+            }
+        }
+    }
+    return arr;
+}
+
+LEAN_EXPORT lean_obj_res leant_c_pg_connect(b_lean_obj_arg conn_str_obj, lean_obj_arg world) {
+    (void)world;
+    char err_buf[512] = {0};
+    void *client = leant_rust_pg_connect(lean_string_cstr(conn_str_obj), (uint8_t *)err_buf, sizeof(err_buf));
+    if (client == NULL) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(err_buf[0] ? err_buf : "postgres connect failed")));
+    }
+    return lean_io_result_mk_ok(lean_alloc_external(get_pg_conn_class(), client));
+}
+
+LEAN_EXPORT lean_obj_res leant_c_pg_exec(
+    b_lean_obj_arg conn_obj,
+    b_lean_obj_arg sql_obj,
+    b_lean_obj_arg params_obj,
+    lean_obj_arg world
+) {
+    (void)world;
+    void *client = lean_get_external_data(conn_obj);
+    size_t n = 0;
+    PgParamC *params = marshal_pg_params(params_obj, &n);
+    char err_buf[512] = {0};
+    int32_t rc = leant_rust_pg_exec(client, lean_string_cstr(sql_obj), params, n, (uint8_t *)err_buf, sizeof(err_buf));
+    free(params);
+    if (rc != 0) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(err_buf[0] ? err_buf : "postgres exec failed")));
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+}
+
+LEAN_EXPORT lean_obj_res leant_c_pg_query(
+    b_lean_obj_arg conn_obj,
+    b_lean_obj_arg sql_obj,
+    b_lean_obj_arg params_obj,
+    lean_obj_arg world
+) {
+    (void)world;
+    void *client = lean_get_external_data(conn_obj);
+    size_t n = 0;
+    PgParamC *params = marshal_pg_params(params_obj, &n);
+    PgResultSetC rs = {0, 0, NULL};
+    char err_buf[512] = {0};
+    int32_t rc = leant_rust_pg_query(client, lean_string_cstr(sql_obj), params, n, &rs, (uint8_t *)err_buf, sizeof(err_buf));
+    free(params);
+    if (rc != 0) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(err_buf[0] ? err_buf : "postgres query failed")));
+    }
+
+    lean_obj_res rows = lean_mk_empty_array_with_capacity(lean_box(rs.num_rows));
+    for (size_t r = 0; r < rs.num_rows; r++) {
+        lean_obj_res row = lean_mk_empty_array_with_capacity(lean_box(rs.num_cols));
+        for (size_t c = 0; c < rs.num_cols; c++) {
+            PgCellC cell = rs.cells[r * rs.num_cols + c];
+            lean_obj_res val;
+            if (cell.tag == 1) {
+                val = lean_alloc_ctor(1, 1, 0);
+                lean_ctor_set(val, 0, lean_int64_to_int(cell.int_val));
+            } else if (cell.tag == 2) {
+                lean_obj_res s = (cell.bytes_ptr != NULL && cell.bytes_len > 0)
+                    ? lean_mk_string_from_bytes((const char *)cell.bytes_ptr, cell.bytes_len)
+                    : lean_mk_string("");
+                val = lean_alloc_ctor(2, 1, 0);
+                lean_ctor_set(val, 0, s);
+            } else if (cell.tag == 3) {
+                val = lean_alloc_ctor(3, 0, 1);
+                lean_ctor_set_uint8(val, 0, cell.bool_val ? 1 : 0);
+            } else if (cell.tag == 4) {
+                lean_obj_res ba = lean_alloc_sarray(1, cell.bytes_len, cell.bytes_len);
+                if (cell.bytes_len > 0 && cell.bytes_ptr != NULL) {
+                    memcpy(lean_sarray_cptr(ba), cell.bytes_ptr, cell.bytes_len);
+                }
+                val = lean_alloc_ctor(4, 1, 0);
+                lean_ctor_set(val, 0, ba);
+            } else {
+                val = lean_box(0);
+            }
+            row = lean_array_push(row, val);
+        }
+        rows = lean_array_push(rows, row);
+    }
+    leant_rust_pg_free_result(&rs);
+    return lean_io_result_mk_ok(rows);
+}
+
 
