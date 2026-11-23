@@ -1,17 +1,20 @@
 use std::net::SocketAddr;
 use std::os::raw::{c_char, c_void};
 use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
+use hyper::body::Body;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 /// Opaque wrapper around Lean handler closure pointer (marked MT via lean_mark_mt).
 #[derive(Clone, Copy)]
@@ -49,41 +52,14 @@ extern "C" {
     fn leant_bridge_free_response(lean_obj: *mut c_void);
 }
 
-async fn handle_req(
+fn dispatch_to_lean(
     ctx: HandlerCtx,
-    max_body_bytes: usize,
-    req: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let method = req.method().as_str().as_bytes().to_vec();
-    let path = req.uri().path().as_bytes().to_vec();
-    let query = req.uri().query().unwrap_or("").as_bytes().to_vec();
-
-    // Serialize incoming headers as "name: value\n"
-    let mut headers_buf = Vec::with_capacity(256);
-    for (name, value) in req.headers().iter() {
-        if let Ok(v) = value.to_str() {
-            headers_buf.extend_from_slice(name.as_str().as_bytes());
-            headers_buf.extend_from_slice(b": ");
-            headers_buf.extend_from_slice(v.as_bytes());
-            headers_buf.push(b'\n');
-        }
-    }
-
-    // Collect body with size guard
-    let body_bytes = match req.into_body().collect().await {
-        Ok(collected) => {
-            let b = collected.to_bytes();
-            if max_body_bytes > 0 && b.len() > max_body_bytes {
-                return Ok(Response::builder()
-                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Full::new(Bytes::from_static(b"Payload Too Large")))
-                    .unwrap());
-            }
-            b
-        }
-        Err(_) => Bytes::new(),
-    };
-
+    method: &[u8],
+    path: &[u8],
+    query: &[u8],
+    headers_buf: &[u8],
+    body_bytes: &[u8],
+) -> Response<Full<Bytes>> {
     let mut resp = LeanRawResponse {
         status: 500,
         headers_ptr: std::ptr::null(),
@@ -135,17 +111,129 @@ async fn handle_req(
             if let Some((k, v)) = line.split_once(':') {
                 let k = k.trim();
                 let v = v.trim();
-                if let (Ok(hn), Ok(hv)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                if let (Ok(hn), Ok(hv)) =
+                    (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                {
                     builder = builder.header(hn, hv);
                 }
             }
         }
     }
 
-    Ok(builder.body(Full::new(resp_body)).unwrap())
+    builder.body(Full::new(resp_body)).unwrap()
 }
 
-/// Starts the Tokio + Hyper HTTP/1.1 server until SIGINT/SIGTERM is received.
+async fn handle_req_inner(
+    ctx: HandlerCtx,
+    max_body_bytes: usize,
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    // Hot path (M2.8): if request has no body (e.g. GET /plaintext, GET /json),
+    // skip body collection and method/path/query heap copies completely.
+    if req.body().is_end_stream() {
+        let method = req.method().as_str().as_bytes();
+        let path = req.uri().path().as_bytes();
+        let query = req.uri().query().unwrap_or("").as_bytes();
+
+        let mut headers_buf = Vec::new();
+        if !req.headers().is_empty() {
+            headers_buf.reserve(req.headers().len() * 32);
+            for (name, value) in req.headers().iter() {
+                if let Ok(v) = value.to_str() {
+                    headers_buf.extend_from_slice(name.as_str().as_bytes());
+                    headers_buf.extend_from_slice(b": ");
+                    headers_buf.extend_from_slice(v.as_bytes());
+                    headers_buf.push(b'\n');
+                }
+            }
+        }
+
+        return Ok(dispatch_to_lean(ctx, method, path, query, &headers_buf, &[]));
+    }
+
+    let method = req.method().as_str().as_bytes().to_vec();
+    let path = req.uri().path().as_bytes().to_vec();
+    let query = req.uri().query().unwrap_or("").as_bytes().to_vec();
+
+    let mut headers_buf = Vec::with_capacity(req.headers().len() * 32);
+    for (name, value) in req.headers().iter() {
+        if let Ok(v) = value.to_str() {
+            headers_buf.extend_from_slice(name.as_str().as_bytes());
+            headers_buf.extend_from_slice(b": ");
+            headers_buf.extend_from_slice(v.as_bytes());
+            headers_buf.push(b'\n');
+        }
+    }
+
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => {
+            let b = collected.to_bytes();
+            if max_body_bytes > 0 && b.len() > max_body_bytes {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .body(Full::new(Bytes::from_static(b"Payload Too Large")))
+                    .unwrap());
+            }
+            b
+        }
+        Err(_) => Bytes::new(),
+    };
+
+    Ok(dispatch_to_lean(
+        ctx,
+        &method,
+        &path,
+        &query,
+        &headers_buf,
+        &body_bytes,
+    ))
+}
+
+async fn handle_req(
+    ctx: HandlerCtx,
+    max_body_bytes: usize,
+    request_timeout_ms: u32,
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    if request_timeout_ms > 0 {
+        match tokio::time::timeout(
+            Duration::from_millis(request_timeout_ms as u64),
+            handle_req_inner(ctx, max_body_bytes, req),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Ok(Response::builder()
+                .status(StatusCode::REQUEST_TIMEOUT)
+                .header(hyper::header::CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(Full::new(Bytes::from_static(
+                    b"{\"error\":\"Request Timeout\"}",
+                )))
+                .unwrap()),
+        }
+    } else {
+        handle_req_inner(ctx, max_body_bytes, req).await
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Starts the Tokio + Hyper HTTP/1.1 server with header/request timeouts,
+/// connection cap, and graceful drain on SIGINT/SIGTERM (M2.3).
 #[no_mangle]
 pub extern "C" fn leant_rust_serve(
     host_ptr: *const c_char,
@@ -153,12 +241,19 @@ pub extern "C" fn leant_rust_serve(
     max_connections: u32,
     max_body_bytes: usize,
     keep_alive: u8,
+    header_timeout_ms: u32,
+    request_timeout_ms: u32,
+    shutdown_timeout_ms: u32,
     handler_ctx: *mut c_void,
 ) -> i32 {
     let host = if host_ptr.is_null() {
         "127.0.0.1"
     } else {
-        unsafe { std::ffi::CStr::from_ptr(host_ptr).to_str().unwrap_or("127.0.0.1") }
+        unsafe {
+            std::ffi::CStr::from_ptr(host_ptr)
+                .to_str()
+                .unwrap_or("127.0.0.1")
+        }
     };
     let addr: SocketAddr = match format!("{}:{}", host, port).parse() {
         Ok(a) => a,
@@ -194,12 +289,15 @@ pub extern "C" fn leant_rust_serve(
             None
         };
 
-        let ctrl_c = tokio::signal::ctrl_c();
-        tokio::pin!(ctrl_c);
+        let active_conns = Arc::new(AtomicUsize::new(0));
+        let drain_notify = Arc::new(Notify::new());
+
+        let shutdown = wait_for_shutdown_signal();
+        tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
-                _ = &mut ctrl_c => {
+                _ = &mut shutdown => {
                     break;
                 }
                 accept_res = listener.accept() => {
@@ -211,22 +309,48 @@ pub extern "C" fn leant_rust_serve(
                     let permit = match &conn_sem {
                         Some(sem) => match sem.clone().try_acquire_owned() {
                             Ok(p) => Some(p),
-                            Err(_) => continue, // connection cap reached
+                            Err(_) => continue,
                         },
                         None => None,
                     };
                     let io = TokioIo::new(stream);
+                    let active = active_conns.clone();
+                    let notify = drain_notify.clone();
+                    active.fetch_add(1, Ordering::AcqRel);
+
                     tokio::spawn(async move {
                         let _permit = permit;
-                        let svc = service_fn(move |req| handle_req(ctx, max_body_bytes, req));
-                        let _ = http1::Builder::new()
-                            .keep_alive(enable_keep_alive)
-                            .serve_connection(io, svc)
-                            .await;
+                        let svc = service_fn(move |req| {
+                            handle_req(ctx, max_body_bytes, request_timeout_ms, req)
+                        });
+                        let mut h1 = http1::Builder::new();
+                        h1.keep_alive(enable_keep_alive);
+                        if header_timeout_ms > 0 {
+                            h1.timer(TokioTimer::new())
+                              .header_read_timeout(Duration::from_millis(header_timeout_ms as u64));
+                        }
+                        let _ = h1.serve_connection(io, svc).await;
+                        if active.fetch_sub(1, Ordering::AcqRel) == 1 {
+                            notify.notify_waiters();
+                        }
                     });
                 }
             }
         }
+
+        // Graceful drain: wait up to shutdown_timeout_ms for in-flight connections to finish.
+        if active_conns.load(Ordering::Acquire) > 0 && shutdown_timeout_ms > 0 {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(shutdown_timeout_ms as u64),
+                async {
+                    while active_conns.load(Ordering::Acquire) > 0 {
+                        drain_notify.notified().await;
+                    }
+                },
+            )
+            .await;
+        }
+
         0
     });
 

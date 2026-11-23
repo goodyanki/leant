@@ -50,3 +50,8 @@ lean_exe todo where
   srcDir := "examples/todo"
   root := `Todo
   moreLinkArgs := #["-lpthread", "-ldl", "-lm"]
+
+lean_exe bench_leant where
+  srcDir := "bench/leant"
+  root := `BenchLeant
+  moreLinkArgs := #["-lpthread", "-ldl", "-lm"]

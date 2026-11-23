@@ -13,22 +13,13 @@ extern int32_t leant_rust_serve(
     uint32_t max_connections,
     size_t max_body_bytes,
     uint8_t keep_alive,
+    uint32_t header_timeout_ms,
+    uint32_t request_timeout_ms,
+    uint32_t shutdown_timeout_ms,
     void *handler_ctx
 );
 
-/* Exported by Lean (Leant/Transport/RustHyper.lean):
- * @[export leant_internal_dispatch]
- * def dispatch
- *   (handler : RawHandler)
- *   (method path query headersRaw : String)
- *   (body : ByteArray) : IO RawResponse
- *
- * RawResponse layout:
- *   structure RawResponse where
- *     headersRaw : String   -- obj field 0
- *     body : ByteArray      -- obj field 1
- *     status : UInt16       -- scalar at sizeof(void*) * 2
- */
+/* Exported by Lean (Leant/Transport/RustHyper.lean) */
 extern lean_obj_res leant_internal_dispatch(
     lean_obj_arg handler,
     lean_obj_arg method,
@@ -47,6 +38,28 @@ typedef struct {
     size_t body_len;
     void *lean_obj;
 } LeanRawResponse;
+
+/* Persistent zero-alloc singletons for common hot-path request inputs (M2.8). */
+static lean_object *g_empty_str = NULL;
+static lean_object *g_empty_bytes = NULL;
+static lean_object *g_method_get = NULL;
+static lean_object *g_method_post = NULL;
+
+static void init_persistent_singletons(void) {
+    if (g_empty_str == NULL) {
+        g_empty_str = lean_mk_string_from_bytes("", 0);
+        lean_mark_persistent(g_empty_str);
+
+        g_empty_bytes = lean_alloc_sarray(1, 0, 0);
+        lean_mark_persistent(g_empty_bytes);
+
+        g_method_get = lean_mk_string_from_bytes("GET", 3);
+        lean_mark_persistent(g_method_get);
+
+        g_method_post = lean_mk_string_from_bytes("POST", 4);
+        lean_mark_persistent(g_method_post);
+    }
+}
 
 void leant_bridge_thread_init(void) {
     lean_initialize_thread();
@@ -73,14 +86,31 @@ void leant_bridge_handle(
     lean_object *handler = (lean_object *)handler_ctx;
     lean_inc(handler);
 
-    lean_obj_res m = lean_mk_string_from_bytes((const char *)method_ptr, method_len);
-    lean_obj_res p = lean_mk_string_from_bytes((const char *)path_ptr, path_len);
-    lean_obj_res q = lean_mk_string_from_bytes((const char *)query_ptr, query_len);
-    lean_obj_res h = lean_mk_string_from_bytes((const char *)headers_ptr, headers_len);
+    lean_obj_res m;
+    if (method_len == 3 && memcmp(method_ptr, "GET", 3) == 0) {
+        m = g_method_get;
+    } else if (method_len == 4 && memcmp(method_ptr, "POST", 4) == 0) {
+        m = g_method_post;
+    } else {
+        m = lean_mk_string_from_bytes((const char *)method_ptr, method_len);
+    }
 
-    lean_obj_res b = lean_alloc_sarray(1, body_len, body_len);
-    if (body_len > 0 && body_ptr != NULL) {
-        memcpy(lean_sarray_cptr(b), body_ptr, body_len);
+    lean_obj_res p = lean_mk_string_from_bytes((const char *)path_ptr, path_len);
+    lean_obj_res q = (query_len == 0)
+        ? g_empty_str
+        : lean_mk_string_from_bytes((const char *)query_ptr, query_len);
+    lean_obj_res h = (headers_len == 0)
+        ? g_empty_str
+        : lean_mk_string_from_bytes((const char *)headers_ptr, headers_len);
+
+    lean_obj_res b;
+    if (body_len == 0) {
+        b = g_empty_bytes;
+    } else {
+        b = lean_alloc_sarray(1, body_len, body_len);
+        if (body_ptr != NULL) {
+            memcpy(lean_sarray_cptr(b), body_ptr, body_len);
+        }
     }
 
     lean_obj_res io_res = leant_internal_dispatch(handler, m, p, q, h, b, lean_io_mk_world());
@@ -117,26 +147,19 @@ void leant_bridge_free_response(void *lean_obj) {
     }
 }
 
-/* Called by Lean:
- * @[extern "leant_c_serve"]
- * opaque serveRaw
- *   (host : @& String)
- *   (port : UInt16)
- *   (maxConnections : UInt32)
- *   (maxBodyBytes : USize)
- *   (keepAlive : Bool)
- *   (handler : RawHandler) : IO Unit
- */
 LEAN_EXPORT lean_obj_res leant_c_serve(
     b_lean_obj_arg host_obj,
     uint16_t port,
     uint32_t max_connections,
     size_t max_body_bytes,
     uint8_t keep_alive,
+    uint32_t header_timeout_ms,
+    uint32_t request_timeout_ms,
+    uint32_t shutdown_timeout_ms,
     lean_obj_arg handler,
     lean_obj_arg world
 ) {
-    /* Mark the entire handler/router closure graph multi-threaded before spawning Tokio workers. */
+    init_persistent_singletons();
     lean_mark_mt(handler);
 
     const char *host = lean_string_cstr(host_obj);
@@ -146,6 +169,9 @@ LEAN_EXPORT lean_obj_res leant_c_serve(
         max_connections,
         max_body_bytes,
         keep_alive,
+        header_timeout_ms,
+        request_timeout_ms,
+        shutdown_timeout_ms,
         (void *)handler
     );
 

@@ -42,6 +42,9 @@ private opaque serveRaw
     (maxConnections : UInt32)
     (maxBodyBytes : USize)
     (keepAlive : Bool)
+    (headerTimeoutMs : UInt32)
+    (requestTimeoutMs : UInt32)
+    (shutdownTimeoutMs : UInt32)
     (handler : RawHandler) : IO Unit
 
 /-- Marker type for the Rust Tokio + Hyper HTTP/1.1 transport backend. -/
@@ -53,6 +56,15 @@ def backend : RustHyperTransport := {}
 
 instance : Backend RustHyperTransport where
   serve _ cfg handler :=
-    serveRaw cfg.host cfg.port cfg.maxConnections cfg.maxBodyBytes cfg.keepAlive handler
+    serveRaw
+      cfg.host
+      cfg.port
+      cfg.maxConnections
+      cfg.maxBodyBytes
+      cfg.keepAlive
+      cfg.headerTimeoutMs
+      cfg.requestTimeoutMs
+      cfg.shutdownTimeoutMs
+      handler
 
 end Leant.Transport.RustHyper

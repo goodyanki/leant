@@ -10,7 +10,7 @@ inductive Method where
   | head
   | options
   | other (name : String)
-  deriving Repr, BEq, DecidableEq, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 namespace Method
 

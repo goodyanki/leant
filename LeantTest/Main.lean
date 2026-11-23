@@ -242,10 +242,60 @@ private def testAuthz : IO Unit := do
   | .ok _ => assertTrue "authz guard returns Authorized proof" true
   | .error e => throw <| IO.userError s!"FAIL [guard]: unexpected error {repr e}"
 
+private def testTypedRouteDsl : IO Unit := do
+  let userPostRoute := route! / "users" / (id : Nat) / "posts" / (slug : String)
+  assertEq "DSL toPattern" userPostRoute.toPattern "/users/:id/posts/:slug"
+  assertEq "DSL typed render" (userPostRoute.render 42 "lean-web") "/users/42/posts/lean-web"
+
+  let app := Leant.new
+    |>.getTyped userPostRoute (fun c (id : Nat) (slug : String) =>
+      c.jsonRaw s!"\{\"user\":{id},\"slug\":\"{slug}\"}")
+    |>.group "/api" (·
+      |>.getTyped (route! / "items" / (itemId : PositiveNat)) (fun c itemId => do
+        -- Proof witness `itemId.pos : itemId.val > 0` is guaranteed at compile time!
+        let _ : itemId.val > 0 := itemId.pos
+        c.text s!"item-{itemId.val}"))
+
+  let r1 ← Testing.get app (userPostRoute.render 7 "formal-routing")
+  assertEq "DSL typed dispatch 200" r1.status Status.ok
+  assertEq "DSL typed dispatch body" r1.bodyText "{\"user\":7,\"slug\":\"formal-routing\"}"
+
+  let rBad ← Testing.get app "/users/not-nat/posts/abc"
+  assertEq "DSL invalid Nat param -> 400" rBad.status Status.badRequest
+
+  let rPos ← Testing.get app "/api/items/5"
+  assertEq "DSL refined PositiveNat param" rPos.bodyText "item-5"
+  let rZero ← Testing.get app "/api/items/0"
+  assertEq "DSL PositiveNat rejects 0 -> 400" rZero.status Status.badRequest
+
+private def testSseAndStream : IO Unit := do
+  let app := Leant.new
+    |>.get "/events" (fun c =>
+      c.sse #[
+        { id := some "1", event := some "tick", data := "hello\nworld", retryMs := some 3000 },
+        { data := "done" }
+      ])
+    |>.get "/chunks" (fun c =>
+      c.stream "text/plain; charset=utf-8" fun emit => do
+        emit "part1-".toUTF8
+        emit "part2".toUTF8)
+
+  let rSse ← Testing.get app "/events"
+  assertEq "SSE status" rSse.status Status.ok
+  assertEq "SSE Content-Type" (rSse.headers.get? "content-type") (some "text/event-stream; charset=utf-8")
+  assertEq "SSE Cache-Control" (rSse.headers.get? "cache-control") (some "no-cache")
+  assertEq "SSE wire encoding" rSse.bodyText
+    "id: 1\nevent: tick\nretry: 3000\ndata: hello\ndata: world\n\ndata: done\n\n"
+
+  let rStream ← Testing.get app "/chunks"
+  assertEq "stream chunks body" rStream.bodyText "part1-part2"
+
 def main : IO Unit := do
   testTrieRouting
   testCookiesQueryForm
   testBindingRefinedTypes
   testMiddlewares
   testAuthz
-  IO.println "All Leant M1 tests passed!"
+  testTypedRouteDsl
+  testSseAndStream
+  IO.println "All Leant M1+M2 tests passed!"

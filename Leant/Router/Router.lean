@@ -31,7 +31,7 @@ inductive RouteMatch where
   | methodNotAllowed
   | notFound
 
-private def upsertMethodHandler (hs : List (Method × Handler)) (m : Method) (h : Handler)
+def upsertMethodHandler (hs : List (Method × Handler)) (m : Method) (h : Handler)
     : List (Method × Handler) :=
   match hs with
   | [] => [(m, h)]
@@ -39,7 +39,7 @@ private def upsertMethodHandler (hs : List (Method × Handler)) (m : Method) (h 
     if m' == m then (m, h) :: rest
     else (m', h') :: upsertMethodHandler rest m h
 
-private def findMethodHandler (hs : List (Method × Handler)) (m : Method) : Option Handler :=
+def findMethodHandler (hs : List (Method × Handler)) (m : Method) : Option Handler :=
   match hs with
   | [] => none
   | (m', h) :: rest =>
@@ -60,7 +60,7 @@ def empty : TrieNode := .mk [] [] none none
 
 instance : Inhabited TrieNode := ⟨empty⟩
 
-private def upsertStatic
+def upsertStatic
     (statics : List (String × TrieNode))
     (key : String)
     (update : TrieNode → TrieNode) : List (String × TrieNode) :=
@@ -70,7 +70,7 @@ private def upsertStatic
     if k == key then (k, update child) :: rest
     else (k, child) :: upsertStatic rest key update
 
-private def findStatic (statics : List (String × TrieNode)) (key : String) : Option TrieNode :=
+def findStatic (statics : List (String × TrieNode)) (key : String) : Option TrieNode :=
   match statics with
   | [] => none
   | (k, child) :: rest =>

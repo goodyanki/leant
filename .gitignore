@@ -8,6 +8,9 @@
 # Rust
 /transport/rust-http/target/
 
+# Benchmarks
+/bench/baselines/gin/gin_baseline
+
 # OS / Editor
 .DS_Store
 *.swp

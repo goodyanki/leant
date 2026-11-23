@@ -1,0 +1,17 @@
+server,endpoint,connections,rps,avg_latency,p99_latency,errors,rss_kb
+gin,plaintext,16,32559.51,0.86ms,6.04ms,28,16652
+gin,plaintext,64,41043.79,1.76ms,7.64ms,44,16696
+gin,plaintext,256,46183.92,5.63ms,18.90ms,1,21940
+gin,plaintext,512,46255.55,11.32ms,36.71ms,0,29524
+gin,json,16,30872.29,0.88ms,6.69ms,18,17460
+gin,json,64,39121.26,2.07ms,10.27ms,31,17724
+gin,json,256,42104.61,6.24ms,20.46ms,2,21728
+gin,json,512,42384.28,12.28ms,38.93ms,3,30048
+leant,plaintext,16,50942.26,309.78us,1.52ms,0,69292
+leant,plaintext,64,53503.28,1.15ms,3.59ms,1,69852
+leant,plaintext,256,52379.60,4.70ms,12.06ms,0,72316
+leant,plaintext,512,61393.79,7.28ms,17.41ms,0,76080
+leant,json,16,45277.03,357.86us,1.65ms,8,75736
+leant,json,64,53622.45,1.13ms,3.25ms,0,75636
+leant,json,256,55398.63,4.33ms,10.34ms,0,76096
+leant,json,512,56316.01,8.07ms,18.95ms,0,78196

@@ -19,18 +19,31 @@ jobs:
           curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Check for sorry in core library
+      - name: Check for sorry / partial / unsafe in core library
         run: |
-          if grep -rn '\bsorry\b' Leant.lean Leant/; then
-            echo "ERROR: 'sorry' found in core library!"
+          if grep -rnE '\b(sorry|partial|unsafe)\b' Leant.lean Leant/; then
+            echo "ERROR: forbidden sorry/partial/unsafe found in core library!"
             exit 1
           fi
 
-      - name: Build Leant and examples
+      - name: Build Leant, examples, and benchmark binary
         run: |
           lake build
           lake build hello
           lake build todo
+          lake build bench_leant
 
-      - name: Run unit and in-memory HTTP tests
+      - name: Run unit, formal proof, and in-memory HTTP tests
         run: lake test
+
+      - name: Smoke test bench_leant endpoints
+        run: |
+          ADDR=127.0.0.1:18082 ./.lake/build/bin/bench_leant &
+          PID=$!
+          trap "kill -TERM $PID 2>/dev/null || true; wait $PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18082/plaintext > /dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          test "$(curl -sS http://127.0.0.1:18082/plaintext)" = "Hello, World!"
+          test "$(curl -sS http://127.0.0.1:18082/json)" = '{"message":"Hello, World!"}'
