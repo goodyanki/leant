@@ -34,6 +34,7 @@ jobs:
           lake build
           lake build hello
           lake build todo
+          lake build saas
           lake build bench_leant
 
       - name: Run unit, formal proof, and in-memory HTTP tests

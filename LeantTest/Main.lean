@@ -398,6 +398,95 @@ private def testVerifiedOrmAndSqlite : IO Unit := do
     let emptyCheck := rowGetRefined #[.int 1, .int 1, .text "", .null] colTitle (NonEmptyBounded.ofString (maxLen := 120))
     assertTrue "ORM rowGetRefined rejects empty DB value" (match emptyCheck with | .error _ => true | .ok _ => false)
 
+open Leant.Authz Leant.Security Leant.Security.Crypto Leant.Security.Session in
+private def testSecurityAndAuthzIntegration : IO Unit := do
+  -- 1. HMAC-SHA256 RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?"
+  let mac := hmacSha256 "Jefe".toUTF8 "what do ya want for nothing?".toUTF8
+  assertEq "HMAC-SHA256 RFC 4231 vector"
+    (toHex mac)
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+  assertTrue "ctEq equal bytes" (ctEq mac mac)
+  assertTrue "ctEq unequal bytes" (!ctEq "abc".toUTF8 "abd".toUTF8)
+  let rnd ← randomHex 16
+  assertEq "CSPRNG randomHex length" rnd.length 32
+
+  -- 2. Signed session token: issue, verify, tamper rejection, expiry rejection
+  let cfg : SessionConfig := { secret := "super-secret-key", ttlSeconds := 60 }
+  let alice : Principal := { id := "u1", tenant := "t1", roles := ["admin"] }
+  let tok := issueToken cfg alice (nowSec := 1000)
+  match verifyToken cfg.secret tok (nowSec := 1030) with
+  | .ok claims => assertEq "session verify principal" claims.principal alice
+  | .error e => throw <| IO.userError s!"FAIL [session verify]: {e}"
+
+  let tampered := tok ++ "0"
+  assertTrue "session rejects tampered signature"
+    (match verifyToken cfg.secret tampered (nowSec := 1030) with | .error _ => true | .ok _ => false)
+  assertTrue "session rejects wrong secret"
+    (match verifyToken "wrong-key" tok (nowSec := 1030) with | .error _ => true | .ok _ => false)
+  assertTrue "session rejects expired token"
+    (match verifyToken cfg.secret tok (nowSec := 1061) with | .error _ => true | .ok _ => false)
+
+  -- 3. PolicyDiff auditing
+  let pol1 : Policy := { roleRules := [("admin", .delete, "doc")], ownerActions := [.update] }
+  let pol2 : Policy := { roleRules := [("admin", .delete, "doc"), ("editor", .update, "doc")], ownerActions := [.update], forbidRules := [("suspended", .delete, "doc")] }
+  let diff := PolicyDiff.compute pol1 pol2
+  assertEq "PolicyDiff addedRoleRules" diff.addedRoleRules [("editor", .update, "doc")]
+  assertEq "PolicyDiff addedForbidRules" diff.addedForbidRules [("suspended", .delete, "doc")]
+  assertTrue "PolicyDiff non-empty" (!diff.isEmpty)
+
+  -- 4. Auth middleware + declarative `requires` macro + CSRF + RateLimit
+  let rlMw ← makeRateLimit { capacity := 2, refillPerSec := 1 }
+  let docRes : Resource := { kind := "doc", owner := "u2", tenant := "t1" }
+  let bob : Principal := { id := "u2", tenant := "t1", roles := ["member"] }
+  let bobTok := issueToken cfg bob
+  let aliceTok := issueToken cfg alice
+  let outsider : Principal := { id := "u9", tenant := "t2", roles := ["admin"] }
+  let outsiderTok := issueToken cfg outsider
+
+  let app := Leant.new
+    |>.group "/secure" (·
+      |>.get "/del" (authenticate cfg fun ac =>
+        requires pol2 ac.principal .delete on docRes with _auth =>
+          ac.ctx.text "deleted"))
+    |>.group "/csrf" (·
+      |>.use (csrf {})
+      |>.get "/open" (fun c => c.text "ok")
+      |>.post "/mutate" (fun c => c.text "mutated"))
+    |>.group "/limited" (·
+      |>.use rlMw
+      |>.get "/ping" (fun c => c.text "pong"))
+
+  -- Missing auth -> 401
+  let rNoAuth ← Testing.get app "/secure/del"
+  assertEq "auth missing -> 401" rNoAuth.status Status.unauthorized
+  -- Admin same tenant (Bearer) -> 200
+  let rAdmin ← Testing.get app "/secure/del" "" #[("Authorization", s!"Bearer {aliceTok}")]
+  assertEq "requires admin allowed -> 200" rAdmin.status Status.ok
+  -- Member without delete grant (Cookie) -> 403
+  let rBob ← Testing.get app "/secure/del" "" #[("Cookie", s!"leant_session={bobTok}")]
+  assertEq "requires member denied -> 403" rBob.status Status.forbidden
+  -- Cross-tenant admin -> 403
+  let rOutsider ← Testing.get app "/secure/del" "" #[("Authorization", s!"Bearer {outsiderTok}")]
+  assertEq "requires cross-tenant admin denied -> 403" rOutsider.status Status.forbidden
+
+  -- CSRF middleware
+  let rCsrfGet ← Testing.get app "/csrf/open"
+  assertEq "CSRF safe GET -> 200" rCsrfGet.status Status.ok
+  let rCsrfNoTok ← Testing.post app "/csrf/mutate" ""
+  assertEq "CSRF missing token -> 403" rCsrfNoTok.status Status.forbidden
+  let rCsrfBad ← Testing.post app "/csrf/mutate" "" #[("Cookie", "leant_csrf=aaa"), ("X-CSRF-Token", "bbb")]
+  assertEq "CSRF mismatch -> 403" rCsrfBad.status Status.forbidden
+  let rCsrfOk ← Testing.post app "/csrf/mutate" "" #[("Cookie", "leant_csrf=tok123"), ("X-CSRF-Token", "tok123")]
+  assertEq "CSRF matching token -> 200" rCsrfOk.status Status.ok
+
+  -- Token-bucket rate limiter (capacity = 2)
+  let rRl1 ← Testing.get app "/limited/ping" "" #[("X-Client-Id", "c1")]
+  let rRl2 ← Testing.get app "/limited/ping" "" #[("X-Client-Id", "c1")]
+  let rRl3 ← Testing.get app "/limited/ping" "" #[("X-Client-Id", "c1")]
+  assertEq "rateLimit #1 -> 200" rRl1.status Status.ok
+  assertEq "rateLimit #2 -> 200" rRl2.status Status.ok
+  assertEq "rateLimit #3 -> 429" rRl3.status Status.tooManyRequests
+
 def main : IO Unit := do
   testTrieRouting
   testCookiesQueryForm
@@ -407,4 +496,5 @@ def main : IO Unit := do
   testTypedRouteDsl
   testSseAndStream
   testVerifiedOrmAndSqlite
+  testSecurityAndAuthzIntegration
   IO.println "All Leant tests passed!"

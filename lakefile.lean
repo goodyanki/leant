@@ -65,6 +65,11 @@ lean_exe todo where
   root := `Todo
   moreLinkArgs := commonLinkArgs
 
+lean_exe saas where
+  srcDir := "examples/saas"
+  root := `Saas
+  moreLinkArgs := commonLinkArgs
+
 lean_exe bench_leant where
   srcDir := "bench/leant"
   root := `BenchLeant

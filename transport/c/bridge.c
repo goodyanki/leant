@@ -184,3 +184,50 @@ LEAN_EXPORT lean_obj_res leant_c_serve(
     }
     return lean_io_result_mk_ok(lean_box(0));
 }
+
+/* ---------- Crypto FFI Wrappers ---------- */
+
+extern int32_t leant_rust_hmac_sha256(
+    const uint8_t *key_ptr, size_t key_len,
+    const uint8_t *data_ptr, size_t data_len,
+    uint8_t *out32
+);
+extern uint8_t leant_rust_ct_eq(
+    const uint8_t *a_ptr, size_t a_len,
+    const uint8_t *b_ptr, size_t b_len
+);
+extern int32_t leant_rust_random_bytes(uint8_t *out_ptr, size_t len);
+
+LEAN_EXPORT lean_obj_res leant_c_hmac_sha256(b_lean_obj_arg key_ba, b_lean_obj_arg data_ba) {
+    lean_obj_res out = lean_alloc_sarray(1, 32, 32);
+    int32_t rc = leant_rust_hmac_sha256(
+        lean_sarray_cptr(key_ba), lean_sarray_size(key_ba),
+        lean_sarray_cptr(data_ba), lean_sarray_size(data_ba),
+        lean_sarray_cptr(out)
+    );
+    if (rc != 0) {
+        memset(lean_sarray_cptr(out), 0, 32);
+    }
+    return out;
+}
+
+LEAN_EXPORT uint8_t leant_c_ct_eq(b_lean_obj_arg a_ba, b_lean_obj_arg b_ba) {
+    return leant_rust_ct_eq(
+        lean_sarray_cptr(a_ba), lean_sarray_size(a_ba),
+        lean_sarray_cptr(b_ba), lean_sarray_size(b_ba)
+    );
+}
+
+LEAN_EXPORT lean_obj_res leant_c_random_bytes(size_t len, lean_obj_arg world) {
+    (void)world;
+    lean_obj_res out = lean_alloc_sarray(1, len, len);
+    int32_t rc = leant_rust_random_bytes(lean_sarray_cptr(out), len);
+    if (rc != 0) {
+        lean_dec(out);
+        return lean_io_result_mk_error(
+            lean_mk_io_user_error(lean_mk_string("CSPRNG failed"))
+        );
+    }
+    return lean_io_result_mk_ok(out);
+}
+

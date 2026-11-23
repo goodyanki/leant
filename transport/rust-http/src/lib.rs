@@ -356,3 +356,86 @@ pub extern "C" fn leant_rust_serve(
 
     result
 }
+
+/* ---------- Audited Pure-Rust Cryptographic Primitives ---------- */
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Computes HMAC-SHA256(key, data) and writes the 32-byte MAC to `out32`.
+/// Returns 0 on success, -1 on invalid arguments.
+#[no_mangle]
+pub extern "C" fn leant_rust_hmac_sha256(
+    key_ptr: *const u8,
+    key_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+    out32: *mut u8,
+) -> i32 {
+    if out32.is_null() {
+        return -1;
+    }
+    let key = if key_len == 0 || key_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(key_ptr, key_len) }
+    };
+    let data = if data_len == 0 || data_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data_ptr, data_len) }
+    };
+    let mut mac = match HmacSha256::new_from_slice(key) {
+        Ok(m) => m,
+        Err(_) => return -1,
+    };
+    mac.update(data);
+    let result = mac.finalize().into_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(result.as_ptr(), out32, 32);
+    }
+    0
+}
+
+/// Constant-time equality comparison of two byte slices (returns 1 if equal, 0 otherwise).
+#[no_mangle]
+pub extern "C" fn leant_rust_ct_eq(
+    a_ptr: *const u8,
+    a_len: usize,
+    b_ptr: *const u8,
+    b_len: usize,
+) -> u8 {
+    if a_len != b_len {
+        return 0;
+    }
+    if a_len == 0 {
+        return 1;
+    }
+    if a_ptr.is_null() || b_ptr.is_null() {
+        return 0;
+    }
+    let a = unsafe { slice::from_raw_parts(a_ptr, a_len) };
+    let b = unsafe { slice::from_raw_parts(b_ptr, b_len) };
+    if bool::from(a.ct_eq(b)) { 1 } else { 0 }
+}
+
+/// Fills `out_ptr[0..len]` with cryptographically secure random bytes from the OS CSPRNG.
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn leant_rust_random_bytes(out_ptr: *mut u8, len: usize) -> i32 {
+    if len == 0 {
+        return 0;
+    }
+    if out_ptr.is_null() {
+        return -1;
+    }
+    let buf = unsafe { slice::from_raw_parts_mut(out_ptr, len) };
+    match getrandom::getrandom(buf) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
