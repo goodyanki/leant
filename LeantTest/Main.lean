@@ -101,7 +101,7 @@ private def testCookiesQueryForm : IO Unit := do
   let rfBad ← Testing.post app "/form" "title=&done=true"
   assertEq "form empty NonEmpty -> 400" rfBad.status Status.badRequest
 
-  -- Cookie parsing & secure defaults (PRD S1)
+  -- Cookie parsing & secure defaults
   let rc ← Testing.get app "/session" "" #[("Cookie", "theme=dark; sid=abc-1")]
   assertEq "cookie read" rc.bodyText "abc-1"
   let setCookie := (rc.headers.get? "set-cookie").getD ""
@@ -290,6 +290,114 @@ private def testSseAndStream : IO Unit := do
   let rStream ← Testing.get app "/chunks"
   assertEq "stream chunks body" rStream.bodyText "part1-part2"
 
+open Leant.Data in
+private def testVerifiedOrmAndSqlite : IO Unit := do
+    -- Define a tenant-scoped `notes` table: (id, tenant_id, title, note_body)
+    let notesSchema : Schema := {
+      tableName := ⟨"notes", by decide⟩
+      cols := [
+        { name := ⟨"id", by decide⟩, ty := .int, isPrimaryKey := true, isAutoIncrement := true },
+        { name := ⟨"tenant_id", by decide⟩, ty := .int },
+        { name := ⟨"title", by decide⟩, ty := .text },
+        { name := ⟨"body", by decide⟩, ty := .nullableText }
+      ]
+    }
+    let colId : ColRef notesSchema .int := ⟨0, _, rfl, rfl⟩
+    let colTenant : ColRef notesSchema .int := ⟨1, _, rfl, rfl⟩
+    let colTitle : ColRef notesSchema .text := ⟨2, _, rfl, rfl⟩
+    let colBody : ColRef notesSchema .nullableText := ⟨3, _, rfl, rfl⟩
+    let notesTable : Table (.tenantScoped .int) := {
+      schema := notesSchema
+      tenantCol := colTenant
+    }
+
+    -- 1. SQL injection non-interference at runtime + arity check
+    let malicious := "'; DROP TABLE notes; --"
+    let qBenign := SelectQuery.fromTable notesTable
+      |>.filter (colTitle ==. "hello" ||. colTitle.like "%safe%")
+      |>.orderBy colId .asc
+      |>.limit 10
+      |>.forTenant 1
+    let qEvil := SelectQuery.fromTable notesTable
+      |>.filter (colTitle ==. malicious ||. colTitle.like malicious)
+      |>.orderBy colId .asc
+      |>.limit 5
+      |>.forTenant 1
+    assertEq "ORM SQL injection non-interference" qBenign.render.sql qEvil.render.sql
+    assertEq "ORM placeholder arity"
+      (Theorems.countPlaceholders qEvil.render.sql) qEvil.render.params.size
+
+    -- 2. Real SQLite connection pool + DDL + CRUD + Multi-tenant RLS isolation
+    let pool ← Pool.createSqlite ":memory:"
+    pool.migrateTable notesTable
+
+    let id1 ← pool.insert <| InsertQuery.into notesTable
+      |>.set colTenant 1
+      |>.set colTitle "tenant1-secret"
+      |>.set colBody (some "private")
+    let _id2 ← pool.insert <| InsertQuery.into notesTable
+      |>.set colTenant 2
+      |>.set colTitle "tenant2-secret"
+      |>.set colBody none
+    let _id3 ← pool.insert <| InsertQuery.into notesTable
+      |>.set colTenant 1
+      |>.set colTitle malicious
+      |>.set colBody (some "stored literally")
+    assertTrue "ORM SQLite insert returned positive rowid" (id1 > 0)
+
+    -- Even with an adversarial tautology `OR title != ""`, tenant 1 CANNOT see tenant 2's rows!
+    let rlsQuery := SelectQuery.fromTable notesTable
+      |>.filter (colTitle ==. "nope" ||. colTitle !=. "")
+      |>.orderBy colId .asc
+      |>.forTenant 1
+    let t1Rows ← pool.select rlsQuery
+    assertEq "ORM RLS isolates tenant 1 row count" t1Rows.size 2
+
+    -- Malicious SQL payload was stored literally as data and table survived intact
+    let evilLookup := SelectQuery.fromTable notesTable
+      |>.filter (colTitle ==. malicious)
+      |>.forTenant 1
+    let evilRows ← pool.select evilLookup
+    assertEq "ORM malicious payload matched safely as bound value" evilRows.size 1
+
+    -- Nullable column IS NULL query
+    let nullBodyQuery := SelectQuery.fromTable notesTable
+      |>.filter colBody.isNull
+      |>.forTenant 2
+    let nullRows ← pool.select nullBodyQuery
+    assertEq "ORM nullable IS NULL scoped to tenant 2" nullRows.size 1
+
+    -- 3. Scoped UPDATE and DELETE cannot mutate another tenant's rows
+    pool.update <| UpdateQuery.table notesTable
+      |>.set colTitle "hacked"
+      |>.filter (colId ==. id1)
+      |>.forTenant 2 -- wrong tenant!
+    let checkT1 ← pool.select (SelectQuery.fromTable notesTable |>.filter (colId ==. id1) |>.forTenant 1)
+    let titleAfterWrongUpdate := match checkT1[0]? with
+      | some row => (rowGet row colTitle).toOption
+      | none => none
+    assertEq "ORM cross-tenant UPDATE blocked by RLS" titleAfterWrongUpdate (some "tenant1-secret")
+
+    -- 4. Transaction automatic ROLLBACK on failure
+    let rolledBack ←
+      try
+        pool.withTransaction fun conn => do
+          let _ ← Pool.insertOn conn <| InsertQuery.into notesTable
+            |>.set colTenant 2
+            |>.set colTitle "should-rollback"
+            |>.set colBody none
+          throw (IO.userError "simulated failure")
+        pure false
+      catch _ =>
+        pure true
+    assertTrue "ORM transaction caught error" rolledBack
+    let t2AfterRollback ← pool.select (SelectQuery.fromTable notesTable |>.forTenant 2)
+    assertEq "ORM transaction rolled back cleanly" t2AfterRollback.size 1
+
+    -- 5. Refined type validation rejects corrupted data at DB boundary
+    let emptyCheck := rowGetRefined #[.int 1, .int 1, .text "", .null] colTitle (NonEmptyBounded.ofString (maxLen := 120))
+    assertTrue "ORM rowGetRefined rejects empty DB value" (match emptyCheck with | .error _ => true | .ok _ => false)
+
 def main : IO Unit := do
   testTrieRouting
   testCookiesQueryForm
@@ -298,4 +406,5 @@ def main : IO Unit := do
   testAuthz
   testTypedRouteDsl
   testSseAndStream
-  IO.println "All Leant M1+M2 tests passed!"
+  testVerifiedOrmAndSqlite
+  IO.println "All Leant tests passed!"

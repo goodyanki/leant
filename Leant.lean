@@ -17,3 +17,10 @@ import Leant.Router.Dsl
 import Leant.Testing.Basic
 import Leant.Authz.Basic
 import Leant.Data.Basic
+import Leant.Data.Schema
+import Leant.Data.Expr
+import Leant.Data.Query
+import Leant.Data.Theorems
+import Leant.Data.Sqlite
+import Leant.Data.Pool
+import Leant.Data.Model
