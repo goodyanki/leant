@@ -81,3 +81,7 @@ lean_exe bench_leant where
   srcDir := "bench/leant"
   root := `BenchLeant
   moreLinkArgs := commonLinkArgs
+
+lean_exe orm_insert_probe where
+  root := `LeantTest.InsertProbe
+  moreLinkArgs := commonLinkArgs
