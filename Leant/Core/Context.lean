@@ -4,7 +4,7 @@ import Leant.Core.Error
 
 namespace Leant
 
-/-- Typeclass for parsing path/query parameter strings into typed values. -/
+/-- Typeclass for parsing path/query/form parameter strings into typed values. -/
 class FromParam (α : Type) where
   parseParam : String → Option α
 
@@ -52,13 +52,56 @@ def param! (c : Context) (name : String) {α : Type} [FromParam α] : HandlerM �
     | some v => pure v
     | none => throw (.badRequest s!"invalid path parameter '{name}': {raw}")
 
-/-- Looks up a query parameter by key. -/
+/-- Looks up a URL-decoded query parameter by key. -/
 def query? (c : Context) (key : String) : Option String :=
   c.request.queryParam? key
+
+/-- Parses a required query parameter into `α`, returning `400 Bad Request` on failure. -/
+def query! (c : Context) (key : String) {α : Type} [FromParam α] : HandlerM α :=
+  match c.query? key with
+  | none => throw (.badRequest s!"missing query parameter: {key}")
+  | some raw =>
+    match FromParam.parseParam (α := α) raw with
+    | some v => pure v
+    | none => throw (.badRequest s!"invalid query parameter '{key}': {raw}")
+
+/-- Parses an optional query parameter into `α`, falling back to `defaultVal` when absent. -/
+def queryOr (c : Context) (key : String) {α : Type} [FromParam α] (defaultVal : α) : HandlerM α :=
+  match c.query? key with
+  | none => pure defaultVal
+  | some raw =>
+    match FromParam.parseParam (α := α) raw with
+    | some v => pure v
+    | none => throw (.badRequest s!"invalid query parameter '{key}': {raw}")
 
 /-- Looks up a request header (case-insensitive). -/
 def header? (c : Context) (name : String) : Option String :=
   c.request.headers.get? name
+
+/-- Looks up an incoming cookie value by name. -/
+def cookie? (c : Context) (name : String) : Option String :=
+  c.request.cookie? name
+
+/-- Returns raw request body bytes. -/
+def bodyBytes (c : Context) : ByteArray :=
+  c.request.body
+
+/-- Parses `application/x-www-form-urlencoded` body fields. -/
+def formParams (c : Context) : Array (String × String) :=
+  parseFormEncoded c.request.bodyText
+
+/-- Looks up a single form field by key. -/
+def form? (c : Context) (key : String) : Option String :=
+  (c.formParams.find? fun (k, _) => k == key).map Prod.snd
+
+/-- Parses a required form field into `α`, returning `400 Bad Request` on failure. -/
+def form! (c : Context) (key : String) {α : Type} [FromParam α] : HandlerM α :=
+  match c.form? key with
+  | none => throw (.badRequest s!"missing form field: {key}")
+  | some raw =>
+    match FromParam.parseParam (α := α) raw with
+    | some v => pure v
+    | none => throw (.badRequest s!"invalid form field '{key}': {raw}")
 
 /-- Reads a value from the per-request key-value store. -/
 def get? (c : Context) (key : String) : Option String :=

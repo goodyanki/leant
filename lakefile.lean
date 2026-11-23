@@ -43,5 +43,10 @@ lean_exe LeantTest where
 
 lean_exe hello where
   srcDir := "examples/hello"
-  root := `Main
+  root := `Hello
+  moreLinkArgs := #["-lpthread", "-ldl", "-lm"]
+
+lean_exe todo where
+  srcDir := "examples/todo"
+  root := `Todo
   moreLinkArgs := #["-lpthread", "-ldl", "-lm"]

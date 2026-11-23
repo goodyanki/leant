@@ -30,6 +30,7 @@ jobs:
         run: |
           lake build
           lake build hello
+          lake build todo
 
       - name: Run unit and in-memory HTTP tests
         run: lake test

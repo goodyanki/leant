@@ -8,7 +8,13 @@
 
 基于 M0 压测基线（见 [bench/results/M0.md](bench/results/M0.md) 与 [ADR-001](docs/adr/001-rust-hyper-transport.md)）：
 - **HTTP 传输层**（`transport/rust-http` + `transport/c/bridge.c`）：Rust `tokio` + `hyper` 1.x 多线程 HTTP/1.1 引擎，通过薄 C ABI shim 与 Lean 4 runtime 线程安全集成。
-- **Web 内核**（`Leant/Core`, `Leant/Router`, `Leant/Middleware`, `Leant/App`）：Gin 风格的路由、分组、洋葱中间件、`Context`、`AppError` 与内存测试工具 `Leant.Testing`。
+- **Web 内核**（`Leant/Core`, `Leant/Router`, `Leant/Binding`, `Leant/Middleware`, `Leant/App`）：
+  - 全函数段级前缀/基数 Trie 路由（静态 > `:param` > `*wildcard`，支持回溯与 404/405 区分）
+  - 路由分组 `group`、洋葱中间件链与 `abort` 短路
+  - `Context`（param / query / form / header / cookie / body / JSON 绑定 / 请求级 KV）与安全默认值 Cookie（`HttpOnly; Secure; SameSite=Lax`）
+  - 携带编译期证明的精化绑定类型（`NonEmpty`、`Bounded n`、`NonEmptyBounded n`、`Email`、`PositiveNat`）
+  - 内置中间件：`logger`、`recovery`、`makeRequestId`/`requestId`、`cors`/`corsWith`、`bodyLimit`、`timeout`
+  - 内存 HTTP 测试工具：`Leant.Testing`
 - **可证明安全核心**（`Leant/Authz`, `Leant/Data`）：零 `sorry` 的策略求值引擎与核心定理（租户隔离、Deny 优先、默认拒绝）及参数化 SQL 抽象。
 
 ## 快速开始
@@ -23,14 +29,23 @@ lake test
 # 构建并运行示例服务
 lake build hello
 ./.lake/build/bin/hello
+
+# 或运行 Todo CRUD API 示例（含线程安全 Std.Mutex 状态 + 精化类型校验）
+lake build todo
+./.lake/build/bin/todo
 ```
 
-测试接口：
+测试 Todo API：
 
 ```bash
-curl http://127.0.0.1:8080/ping
-curl http://127.0.0.1:8080/api/v1/users/42
-curl -X POST http://127.0.0.1:8080/api/v1/users -H "X-Request-Id: demo-1" -d '{"name":"alice"}'
+curl -X POST http://127.0.0.1:8080/api/v1/todos \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Write formal proofs"}'
+curl http://127.0.0.1:8080/api/v1/todos
+curl -X PATCH http://127.0.0.1:8080/api/v1/todos/1 \
+  -H "Content-Type: application/json" \
+  -d '{"completed":true}'
+curl -X DELETE http://127.0.0.1:8080/api/v1/todos/1
 ```
 
 ## 文档

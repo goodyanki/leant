@@ -18,11 +18,14 @@ def unauthorized : Status := ⟨401⟩
 def forbidden : Status := ⟨403⟩
 def notFound : Status := ⟨404⟩
 def methodNotAllowed : Status := ⟨405⟩
+def requestTimeout : Status := ⟨408⟩
 def conflict : Status := ⟨409⟩
 def payloadTooLarge : Status := ⟨413⟩
+def unprocessableEntity : Status := ⟨422⟩
 def tooManyRequests : Status := ⟨429⟩
 def internalServerError : Status := ⟨500⟩
 def serviceUnavailable : Status := ⟨503⟩
+def gatewayTimeout : Status := ⟨504⟩
 
 instance : ToString Status := ⟨fun s => toString s.code⟩
 
